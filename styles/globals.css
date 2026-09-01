@@ -1,0 +1,31 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Bebas+Neue&display=swap');
+
+:root {
+  --bg: #f5f4f1;
+  --surface: #ffffff;
+  --border: #e0ddd8;
+  --text: #1c1c1c;
+  --muted: #888;
+  --green: #1a6b3a;
+  --green-dim: #e8f5ee;
+  --green-border: #b8ddc8;
+  --red: #c0392b;
+  --red-dim: #fdf2f2;
+  --red-border: #f5c0b8;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  font-family: 'Inter', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-text-size-adjust: 100%;
+}
+
+button { cursor: pointer; font-family: 'Inter', sans-serif; }
+input { font-family: 'Inter', sans-serif; }
+
+/* Prevent zoom on input focus on iOS */
+input[type="number"] { font-size: 16px; }

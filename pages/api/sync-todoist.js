@@ -12,39 +12,25 @@ export default async function handler(req, res) {
   if (!token) return res.status(500).json({ error: 'TODOIST_TOKEN not set' })
 
   try {
-    // Use Todoist Sync API v9 to get projects
-    const syncRes = await fetch('https://api.todoist.com/api/v1/projects', {
+    const projectsRes = await fetch('https://api.todoist.com/api/v1/projects', {
       headers: { 'Authorization': `Bearer ${token}` }
     })
-
-    if (!syncRes.ok) {
-      const txt = await syncRes.text()
-      throw new Error(`Todoist error ${syncRes.status}: ${txt.substring(0, 100)}`)
-    }
-
-    const projectData = await syncRes.json()
+    const projectData = await projectsRes.json()
     const projects = projectData.results || projectData
 
     const packageProject = projects.find(p =>
       p.name.toLowerCase().includes('package')
     )
+    if (!packageProject) return res.status(404).json({ error: 'No Package project found' })
 
-    if (!packageProject) {
-      return res.status(404).json({
-        error: 'No Package project found',
-        projects: projects.map(p => p.name)
-      })
-    }
-
-    // Get active tasks from Package project
     const tasksRes = await fetch(
       `https://api.todoist.com/api/v1/tasks?project_id=${packageProject.id}`,
       { headers: { 'Authorization': `Bearer ${token}` } }
     )
-
-    if (!tasksRes.ok) throw new Error('Could not load tasks')
     const taskData = await tasksRes.json()
-    const tasks = taskData.results || taskData
+
+    // Handle both array and {results: []} response formats
+    const tasks = Array.isArray(taskData) ? taskData : (taskData.results || [])
 
     function parseBatch(content) {
       const match = content.match(/^(\d+\s+\w+(?:\s+of)?)\s+(.+)$/i)

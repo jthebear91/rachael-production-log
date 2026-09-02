@@ -3,7 +3,7 @@ export default async function handler(req, res) {
 
   const token = process.env.TODOIST_TOKEN
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  const supabaseKey = process.env.SUPABASE_ANON_KEY
 
   try {
     // Get projects from Todoist

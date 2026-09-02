@@ -9,7 +9,6 @@ export default async function handler(req, res) {
         'Authorization': `Bearer ${serviceKey}`
       }
     })
-
     const text = await r.text()
     const data = JSON.parse(text)
     res.status(200).json(Array.isArray(data) ? data : [])

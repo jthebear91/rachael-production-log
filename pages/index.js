@@ -55,9 +55,11 @@ export default function App() {
   // ── LOAD BATCHES ───────────────────────────────
   const loadBatches = useCallback(async () => {
     setBatchLoading(true)
-    const r = await fetch('/api/get-batches')
-    const data = await r.json()
-    setBatches(Array.isArray(data) ? data : [])
+    const { data, error } = await supabase
+      .from('batches')
+      .select('*')
+      .order('cooked_at', { ascending: false })
+    if (!error) setBatches(data || [])
     setBatchLoading(false)
   }, [])
 

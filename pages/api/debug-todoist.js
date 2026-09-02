@@ -1,20 +1,24 @@
 export default async function handler(req, res) {
   const token = process.env.TODOIST_TOKEN
 
-  if (!token) return res.status(200).json({ step: 'FAIL', reason: 'No token in environment' })
-
-  const trimmed = token.trim()
-
-  const r = await fetch('https://api.todoist.com/rest/v2/projects', {
-    headers: { 'Authorization': `Bearer ${trimmed}` }
+  const projectsRes = await fetch('https://api.todoist.com/api/v1/projects', {
+    headers: { 'Authorization': `Bearer ${token}` }
   })
+  const projectData = await projectsRes.json()
+  const projects = projectData.results || projectData
 
-  const raw = await r.text()
+  const packageProject = projects.find(p => p.name.toLowerCase().includes('package'))
+  if (!packageProject) return res.status(200).json({ error: 'No package project', allProjects: projects.map(p => p.name) })
+
+  const tasksRes = await fetch(`https://api.todoist.com/api/v1/tasks?project_id=${packageProject.id}`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  })
+  const taskData = await tasksRes.json()
 
   res.status(200).json({
-    httpStatus: r.status,
-    tokenLength: trimmed.length,
-    tokenStart: trimmed.substring(0, 8),
-    rawResponse: raw.substring(0, 300)
+    project: packageProject.name,
+    projectId: packageProject.id,
+    taskCount: Array.isArray(taskData) ? taskData.length : taskData.results?.length,
+    rawTaskData: JSON.stringify(taskData).substring(0, 500)
   })
 }

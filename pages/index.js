@@ -34,21 +34,22 @@ export default function App() {
   const [pushError, setPushError] = useState('')
 
   // ── TODOIST CATEGORY (Daily Log) ────────────────
+  // Everything for a Todoist-sourced batch happens right here: pick one or
+  // more same-item tasks, enter the cases produced, and it's logged as a
+  // finished ("packaged") batch in one step — Batch Tracker just displays
+  // the result afterward.
   const TODOIST_CAT_ID = 'todoist'
   const [todoistItems, setTodoistItems] = useState([])
   const [todoistLoading, setTodoistLoading] = useState(false)
   const [todoistError, setTodoistError] = useState('')
   const [loggingTodoist, setLoggingTodoist] = useState(false)
+  const [selectedTodoistIds, setSelectedTodoistIds] = useState([])
+  const [selectedTodoistItemName, setSelectedTodoistItemName] = useState('')
+  const [todoistCasesInput, setTodoistCasesInput] = useState('')
 
-  // ── BATCH SCREEN ───────────────────────────────
+  // ── BATCH SCREEN (read-only display) ───────────
   const [batches, setBatches] = useState([])
   const [batchLoading, setBatchLoading] = useState(false)
-  const [syncing, setSyncing] = useState(false)
-  const [syncMsg, setSyncMsg] = useState('')
-  const [selectedBatches, setSelectedBatches] = useState([])
-  const [packagingCases, setPackagingCases] = useState('')
-  const [showPackageModal, setShowPackageModal] = useState(false)
-  const [packaging, setPackaging] = useState(false)
   const [batchTab, setBatchTab] = useState('pending') // 'pending' | 'history' | 'byItem'
   const [selectedHistoryItem, setSelectedHistoryItem] = useState(null) // item_name or null
 
@@ -109,7 +110,14 @@ export default function App() {
     if (activeCat === TODOIST_CAT_ID) loadTodoistItems()
   }, [activeCat, loadTodoistItems])
 
-  // ── LOG HELPERS ────────────────────────────────
+  function resetSelections() {
+    setActiveItem(null)
+    setSelectedTodoistIds([])
+    setSelectedTodoistItemName('')
+    setTodoistCasesInput('')
+  }
+
+  // ── LOG HELPERS (catalog items) ─────────────────
   function addToLog() {
     if (!activeItem) return
     const n = parseInt(qty) || 1
@@ -125,28 +133,52 @@ export default function App() {
     setQty(1)
   }
 
-  // ── LOG A TODOIST BATCH ─────────────────────────
-  // Tapping a Todoist item and confirming logs exactly one batch (matching
-  // that one Todoist task), so it always shows up in Batch Tracker without
-  // needing the manual "Sync from Todoist" button, and checks the task off
-  // in Todoist so it drops out of this list.
-  async function logTodoistBatch(item) {
+  // ── TODOIST SELECTION ───────────────────────────
+  // Tapping an item toggles it in/out of the selection. Selecting items of
+  // a different name than what's already picked starts a fresh selection —
+  // you can only combine batches of the SAME item together.
+  function toggleTodoistItem(item) {
+    setSelectedTodoistIds(prev => {
+      if (prev.includes(item.taskId)) {
+        const next = prev.filter(id => id !== item.taskId)
+        if (next.length === 0) setSelectedTodoistItemName('')
+        return next
+      }
+      if (prev.length > 0 && selectedTodoistItemName !== item.itemName) {
+        setSelectedTodoistItemName(item.itemName)
+        return [item.taskId]
+      }
+      setSelectedTodoistItemName(item.itemName)
+      return [...prev, item.taskId]
+    })
+  }
+
+  // ── LOG (AND PACKAGE) SELECTED TODOIST BATCHES ──
+  async function logTodoistBatches() {
+    if (!selectedTodoistIds.length || !todoistCasesInput) return
     setLoggingTodoist(true)
     try {
+      const firstItem = todoistItems.find(t => selectedTodoistIds.includes(t.taskId))
       const r = await fetch('/api/log-todoist-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          taskId: item.taskId,
-          itemName: item.itemName,
-          batchSize: item.batchSize
+          taskIds: selectedTodoistIds,
+          itemName: selectedTodoistItemName,
+          batchSize: firstItem?.batchSize || '1 Batch',
+          casesProduced: parseInt(todoistCasesInput)
         })
       })
       const data = await r.json()
       if (data.error) throw new Error(data.error)
-      showToast(`Logged batch: ${item.itemName} (${item.batchSize})`, 'info')
-      setTodoistItems(prev => prev.filter(t => t.taskId !== item.taskId))
-      setActiveItem(null)
+      showToast(
+        `Logged ${selectedTodoistIds.length} batch${selectedTodoistIds.length !== 1 ? 'es' : ''} of ${selectedTodoistItemName} — ${todoistCasesInput} cases`,
+        'info'
+      )
+      setTodoistItems(prev => prev.filter(t => !selectedTodoistIds.includes(t.taskId)))
+      setSelectedTodoistIds([])
+      setSelectedTodoistItemName('')
+      setTodoistCasesInput('')
     } catch (e) {
       showToast('Could not log batch: ' + e.message, 'error')
     }
@@ -182,51 +214,6 @@ export default function App() {
     setPushError('')
   }
 
-  // ── TODOIST SYNC ───────────────────────────────
-  async function syncTodoist() {
-    setSyncing(true)
-    setSyncMsg('')
-    try {
-      const r = await fetch('/api/sync-todoist', { method: 'POST' })
-      const data = await r.json()
-      if (data.error) throw new Error(data.error)
-      setSyncMsg(`Synced ${data.synced} batch${data.synced !== 1 ? 'es' : ''} from Todoist`)
-      await loadBatches()
-    } catch (e) {
-      setSyncMsg('Sync failed: ' + e.message)
-    }
-    setSyncing(false)
-  }
-
-  // ── PACKAGE BATCHES ────────────────────────────
-  async function packageBatches() {
-    if (!packagingCases || !selectedBatches.length) return
-    setPackaging(true)
-    try {
-      const r = await fetch('/api/package-batches', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ batchIds: selectedBatches, totalCases: parseInt(packagingCases) })
-      })
-      const data = await r.json()
-      if (data.error) throw new Error(data.error)
-      showToast(`${selectedBatches.length} batch${selectedBatches.length !== 1 ? 'es' : ''} packaged — yield saved!`, 'info')
-      setSelectedBatches([])
-      setPackagingCases('')
-      setShowPackageModal(false)
-      await loadBatches()
-    } catch (e) {
-      showToast('Error: ' + e.message, 'error')
-    }
-    setPackaging(false)
-  }
-
-  function toggleBatch(id) {
-    setSelectedBatches(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
-    )
-  }
-
   // ── DATE HELPERS ───────────────────────────────
   function fmtDate(str) {
     if (!str) return '—'
@@ -245,14 +232,6 @@ export default function App() {
   )
   const pendingBatches = batches.filter(b => b.status === 'cooked')
   const historyBatches = batches.filter(b => b.status === 'packaged')
-
-  // If everything currently selected for packaging is the same item, the
-  // backend will merge them into one combined record instead of splitting
-  // the total evenly across each batch — reflect that in the modal copy.
-  const selectedBatchItemNames = [...new Set(
-    selectedBatches.map(id => batches.find(b => b.id === id)?.item_name).filter(Boolean)
-  )]
-  const willMergeSelectedBatches = selectedBatches.length > 1 && selectedBatchItemNames.length === 1
   const totalUnits = log.reduce((s, e) => s + e.qty, 0)
 
   // ── BY-ITEM HISTORY (Batch Tracker "By Item" tab) ──
@@ -321,13 +300,13 @@ export default function App() {
                 <div style={s.pills}>
                   <button
                     style={{ ...s.pill, ...s.pillTodoist, ...(activeCat === TODOIST_CAT_ID ? s.pillTodoistActive : {}) }}
-                    onClick={() => { setActiveCat(TODOIST_CAT_ID); setActiveItem(null) }}
+                    onClick={() => { setActiveCat(TODOIST_CAT_ID); resetSelections() }}
                   >Todoist</button>
                   {visibleCategories.map(cat => (
                     <button
                       key={cat.id}
                       style={{ ...s.pill, ...(activeCat === cat.id ? s.pillActive : {}) }}
-                      onClick={() => { setActiveCat(cat.id); setActiveItem(null) }}
+                      onClick={() => { setActiveCat(cat.id); resetSelections() }}
                     >{cat.name}</button>
                   ))}
                 </div>
@@ -348,15 +327,23 @@ export default function App() {
                     <div style={s.placeholder}>Nothing pending on Todoist right now.</div>
                   )}
                   {!todoistLoading && todoistItems.length > 0 && (
-                    <div style={s.itemGrid}>
-                      {todoistItems.map(item => (
-                        <button
-                          key={item.taskId}
-                          style={{ ...s.itemBtn, ...s.itemBtnTodoist, ...(activeItem?.taskId === item.taskId ? s.itemActive : {}) }}
-                          onClick={() => setActiveItem({ ...item, isTodoist: true })}
-                        >{item.batchSize} — {item.itemName}</button>
-                      ))}
-                    </div>
+                    <>
+                      <div style={{ ...s.placeholder, marginBottom: 8 }}>
+                        Tap one or more batches of the SAME item to combine them, then enter the cases produced below.
+                      </div>
+                      <div style={s.itemGrid}>
+                        {todoistItems.map(item => {
+                          const sel = selectedTodoistIds.includes(item.taskId)
+                          return (
+                            <button
+                              key={item.taskId}
+                              style={{ ...s.itemBtn, ...s.itemBtnTodoist, ...(sel ? s.itemBtnSelected : {}) }}
+                              onClick={() => toggleTodoistItem(item)}
+                            >{sel ? '✓ ' : ''}{item.batchSize} — {item.itemName}</button>
+                          )
+                        })}
+                      </div>
+                    </>
                   )}
                 </>
               )}
@@ -376,21 +363,31 @@ export default function App() {
               )}
             </div>
 
-            {/* Qty + Add — Todoist items log straight to Batch Tracker instead */}
-            {activeItem?.isTodoist ? (
-              <>
-                <div>
-                  <div style={s.sectionLabel}>Logging From Todoist</div>
-                  <div style={s.placeholder}>
-                    This logs one batch of <strong>{activeItem.itemName}</strong> ({activeItem.batchSize}) to Batch Tracker and checks the task off in Todoist.
+            {/* Bottom panel — Todoist cases input, or catalog qty/add */}
+            {activeCat === TODOIST_CAT_ID ? (
+              selectedTodoistIds.length > 0 && (
+                <>
+                  <div>
+                    <div style={s.sectionLabel}>Cases Produced</div>
+                    <div style={s.placeholder}>
+                      {selectedTodoistIds.length} batch{selectedTodoistIds.length !== 1 ? 'es' : ''} of <strong>{selectedTodoistItemName}</strong> selected. Enter the total cases made — this logs it as packaged and checks the task{selectedTodoistIds.length !== 1 ? 's' : ''} off in Todoist.
+                    </div>
+                    <input
+                      style={{ ...s.modalInput, fontSize: 24, fontWeight: 700, textAlign: 'center', padding: '14px', marginTop: 10 }}
+                      type="number" min="1"
+                      value={todoistCasesInput}
+                      onChange={e => setTodoistCasesInput(e.target.value)}
+                      placeholder="0"
+                      autoFocus
+                    />
                   </div>
-                </div>
-                <button
-                  style={{ ...s.btnGreen, opacity: loggingTodoist ? 0.6 : 1, cursor: loggingTodoist ? 'not-allowed' : 'pointer' }}
-                  onClick={() => logTodoistBatch(activeItem)}
-                  disabled={loggingTodoist}
-                >{loggingTodoist ? 'Logging…' : '✓ Log This Batch'}</button>
-              </>
+                  <button
+                    style={{ ...s.btnGreen, opacity: (loggingTodoist || !todoistCasesInput) ? 0.5 : 1, cursor: (loggingTodoist || !todoistCasesInput) ? 'not-allowed' : 'pointer' }}
+                    onClick={logTodoistBatches}
+                    disabled={loggingTodoist || !todoistCasesInput}
+                  >{loggingTodoist ? 'Logging…' : '✓ Log & Package'}</button>
+                </>
+              )
             ) : (
               <>
                 <div>
@@ -462,7 +459,7 @@ export default function App() {
       )}
 
       {/* ══════════════════════════════════════════
-          SCREEN: BATCH TRACKER
+          SCREEN: BATCH TRACKER (read-only display)
       ══════════════════════════════════════════ */}
       {screen === 'batches' && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -483,17 +480,6 @@ export default function App() {
                 onClick={() => setBatchTab('byItem')}
               >By Item ({itemNames.length})</button>
             </div>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-              {syncMsg && <span style={{ fontSize: 12, color: 'var(--muted)' }}>{syncMsg}</span>}
-              <button style={s.btnOutline} onClick={syncTodoist} disabled={syncing}>
-                {syncing ? 'Syncing…' : '↻ Sync from Todoist'}
-              </button>
-              {selectedBatches.length > 0 && (
-                <button style={s.btnGreenSm} onClick={() => setShowPackageModal(true)}>
-                  Package {selectedBatches.length} Batch{selectedBatches.length !== 1 ? 'es' : ''}
-                </button>
-              )}
-            </div>
           </div>
 
           {/* Batch list */}
@@ -504,24 +490,16 @@ export default function App() {
             {batchTab === 'pending' && !batchLoading && (
               <>
                 {pendingBatches.length === 0 && (
-                  <div style={s.logEmpty}>No pending batches.<br /><br />Tap "Sync from Todoist" to pull completed cook tasks.</div>
+                  <div style={s.logEmpty}>No pending batches.<br /><br />Batches you log from the Daily Log's Todoist category are packaged right away — this tab is only for anything still waiting on a case count.</div>
                 )}
                 <div style={s.batchGrid}>
-                  {pendingBatches.map(b => {
-                    const sel = selectedBatches.includes(b.id)
-                    return (
-                      <div
-                        key={b.id}
-                        style={{ ...s.batchCard, ...(sel ? s.batchCardSel : {}) }}
-                        onClick={() => toggleBatch(b.id)}
-                      >
-                        <div style={s.batchCardCheck}>{sel ? '✓' : ''}</div>
-                        <div style={s.batchCardName}>{b.item_name}</div>
-                        <div style={s.batchCardSize}>{b.batch_size}</div>
-                        <div style={s.batchCardDate}>Cooked {fmtDate(b.cooked_at)}</div>
-                      </div>
-                    )
-                  })}
+                  {pendingBatches.map(b => (
+                    <div key={b.id} style={s.batchCard}>
+                      <div style={s.batchCardName}>{b.item_name}</div>
+                      <div style={s.batchCardSize}>{b.batch_size}</div>
+                      <div style={s.batchCardDate}>Cooked {fmtDate(b.cooked_at)}</div>
+                    </div>
+                  ))}
                 </div>
               </>
             )}
@@ -530,7 +508,7 @@ export default function App() {
             {batchTab === 'history' && !batchLoading && (
               <>
                 {historyBatches.length === 0 && (
-                  <div style={s.logEmpty}>No packaging history yet.<br /><br />Package your first batch to start tracking yields.</div>
+                  <div style={s.logEmpty}>No packaging history yet.<br /><br />Log a batch from the Daily Log's Todoist category to start tracking yields.</div>
                 )}
                 <div style={s.historyTable}>
                   {historyBatches.length > 0 && (
@@ -563,7 +541,7 @@ export default function App() {
             {batchTab === 'byItem' && !batchLoading && (
               <>
                 {itemNames.length === 0 && (
-                  <div style={s.logEmpty}>Nothing made yet.<br /><br />Once you log or sync batches, every item you've made will show up here.</div>
+                  <div style={s.logEmpty}>Nothing made yet.<br /><br />Once you log batches from Daily Log, every item you've made will show up here.</div>
                 )}
                 <div style={s.batchGrid}>
                   {itemNames.map(name => {
@@ -572,7 +550,7 @@ export default function App() {
                     return (
                       <div
                         key={name}
-                        style={s.batchCard}
+                        style={{ ...s.batchCard, cursor: 'pointer' }}
                         onClick={() => setSelectedHistoryItem(name)}
                       >
                         <div style={s.batchCardName}>{name}</div>
@@ -646,39 +624,6 @@ export default function App() {
               <button style={s.btnGhost} onClick={() => setShowConfirm(false)}>Cancel</button>
               <button style={s.btnConfirm} onClick={pushToSquare} disabled={pushing}>
                 {pushing ? 'Pushing…' : '✓ Push to Square'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── PACKAGE MODAL ── */}
-      {showPackageModal && (
-        <div style={s.overlay}>
-          <div style={s.modal}>
-            <h2 style={s.modalH}>Package Batches</h2>
-            <p style={s.modalSub}>
-              {willMergeSelectedBatches
-                ? `You selected ${selectedBatches.length} batches of ${selectedBatchItemNames[0]}. Enter the total cases produced — they'll be combined into one entry.`
-                : `You selected ${selectedBatches.length} batch${selectedBatches.length !== 1 ? 'es' : ''}. Enter the total cases produced across all of them — the yield will be split evenly.`}
-            </p>
-            <div style={{ margin: '20px 0' }}>
-              <label style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.4, textTransform: 'uppercase', color: 'var(--muted)', display: 'block', marginBottom: 8 }}>
-                Total Cases Produced
-              </label>
-              <input
-                style={{ ...s.modalInput, fontSize: 28, fontWeight: 700, textAlign: 'center', padding: '16px' }}
-                type="number" min="1"
-                value={packagingCases}
-                onChange={e => setPackagingCases(e.target.value)}
-                placeholder="0"
-                autoFocus
-              />
-            </div>
-            <div style={s.modalBtns}>
-              <button style={s.btnGhost} onClick={() => setShowPackageModal(false)}>Cancel</button>
-              <button style={s.btnConfirm} onClick={packageBatches} disabled={packaging || !packagingCases}>
-                {packaging ? 'Saving…' : 'Save Yield'}
               </button>
             </div>
           </div>
@@ -771,6 +716,7 @@ const s = {
   },
   itemActive: { background: '#1c1c1c', borderColor: '#1c1c1c', color: '#fff', fontWeight: 600 },
   itemBtnTodoist: { borderColor: '#e6b3ac' },
+  itemBtnSelected: { background: '#1a6b3a', borderColor: '#1a6b3a', color: '#fff', fontWeight: 700 },
 
   qtyRow: { display: 'flex', alignItems: 'center', gap: 14 },
   stepper: { display: 'flex', alignItems: 'center', border: '1.5px solid #e0ddd8', borderRadius: 8, background: '#fff', overflow: 'hidden' },
@@ -802,9 +748,7 @@ const s = {
   batchTabActive: { background: '#1c1c1c', borderColor: '#1c1c1c', color: '#fff' },
 
   batchGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 },
-  batchCard: { background: '#fff', border: '1.5px solid #e0ddd8', borderRadius: 10, padding: '16px', cursor: 'pointer', position: 'relative', minHeight: 110 },
-  batchCardSel: { background: '#e8f5ee', borderColor: '#1a6b3a' },
-  batchCardCheck: { position: 'absolute', top: 12, right: 14, fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, color: '#1a6b3a' },
+  batchCard: { background: '#fff', border: '1.5px solid #e0ddd8', borderRadius: 10, padding: '16px', position: 'relative', minHeight: 110 },
   batchCardName: { fontSize: 15, fontWeight: 700, marginBottom: 6, paddingRight: 24, lineHeight: 1.2 },
   batchCardSize: { fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, color: '#1a6b3a', letterSpacing: 1, marginBottom: 8 },
   batchCardDate: { fontSize: 11, color: '#888' },

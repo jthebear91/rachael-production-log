@@ -8,7 +8,9 @@ const HIDDEN_CATEGORIES = [
   'Cajun Market Meats Products',
   'Battered Freezer',
   'Raw Goods (frozen)',
-  'Raw Goods (Refrigerated)'
+  'Raw Goods (Refrigerated)',
+  'Uncategorized',
+  'Vegetables'
 ]
 
 export default function App() {
@@ -236,7 +238,8 @@ export default function App() {
   const dayName = today.toLocaleDateString('en-US', { weekday: 'long' })
   const dateStr = today.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 
-  const filteredItems = items.filter(i => i.categoryId === activeCat)
+  const filteredItems = items.filter(i => i.categoryIds.includes(activeCat))
+  const activeCatObj = categories.find(c => c.id === activeCat)
   const visibleCategories = categories.filter(
     cat => !HIDDEN_CATEGORIES.some(hidden => hidden.toLowerCase() === (cat.name || '').toLowerCase())
   )
@@ -358,7 +361,7 @@ export default function App() {
                     <button
                       key={item.variationId}
                       style={{ ...s.itemBtn, ...(activeItem?.variationId === item.variationId ? s.itemActive : {}) }}
-                      onClick={() => setActiveItem(item)}
+                      onClick={() => setActiveItem({ ...item, categoryName: activeCatObj?.name || 'Uncategorized' })}
                     >{item.name}</button>
                   ))}
                 </div>

@@ -36,27 +36,39 @@ export default async function handler(req, res) {
       catMap[c.id] = name
     })
 
-    // Build items list
+    function isExcludedName(name) {
+      const n = name.toLowerCase()
+      return EXCLUDED_CATEGORIES.includes(n) || n.includes('order guide') || n.includes('vendor')
+    }
+
+    // Build items list. An item in Square can belong to more than one
+    // category (e.g. a location category like "Walk-In Freezer" AND a
+    // type category like "Frozen") — we keep every category id it's
+    // assigned to, so the Daily Log screen can show the item under
+    // whichever of those categories isn't hidden, regardless of which
+    // order Square stores them in.
     const items = []
     allObjects.filter(o => o.type === 'ITEM').forEach(item => {
       const itemName = item.item_data?.name || 'Unknown'
 
       // Handle both old (category_id) and new (categories array) Square formats
-      let catId = null
+      let rawCatIds = []
       if (item.item_data?.categories && item.item_data.categories.length > 0) {
         // New format: categories is an array of {id, ordinal}
-        catId = item.item_data.categories[0].id
+        rawCatIds = item.item_data.categories.map(c => c.id).filter(Boolean)
       } else if (item.item_data?.category_id) {
         // Old format: single category_id string
-        catId = item.item_data.category_id
+        rawCatIds = [item.item_data.category_id]
       }
 
-      const catName = catId && catMap[catId] ? catMap[catId] : 'Uncategorized'
+      // Drop any assigned category that's excluded outright (Order Guide, Vendor, ...)
+      const keptCatIds = [...new Set(rawCatIds)].filter(id => !isExcludedName(catMap[id] || ''))
 
-      // Skip excluded categories like Order Guide
-      if (EXCLUDED_CATEGORIES.includes(catName.toLowerCase())) return
-      if (catName.toLowerCase().includes('order guide')) return
-      if (catName.toLowerCase().includes('vendor')) return
+      // If the item had categories but ALL of them were excluded, skip the
+      // item entirely (matches the old behavior for Order Guide items).
+      if (rawCatIds.length > 0 && keptCatIds.length === 0) return
+
+      const categoryIds = keptCatIds.length > 0 ? keptCatIds : ['__none__']
 
       ;(item.item_data?.variations || []).forEach(v => {
         const vn = (v.item_variation_data?.name || '').trim()
@@ -64,15 +76,20 @@ export default async function handler(req, res) {
         items.push({
           variationId: v.id,
           name: plain ? itemName : `${itemName} (${vn})`,
-          categoryId: catId || '__none__',
-          categoryName: catName
+          categoryIds
         })
       })
     })
 
-    // Build sorted category list from items that made it through
+    // Build sorted category list from every category id that made it
+    // through, across all items (so an item's second/third category shows
+    // up as a pill too, not just its first one).
     const catSet = {}
-    items.forEach(i => { catSet[i.categoryId] = i.categoryName })
+    items.forEach(i => {
+      i.categoryIds.forEach(id => {
+        catSet[id] = id === '__none__' ? 'Uncategorized' : (catMap[id] || 'Uncategorized')
+      })
+    })
     const categories = Object.entries(catSet)
       .map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name))

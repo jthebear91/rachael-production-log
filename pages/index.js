@@ -46,6 +46,9 @@ export default function App() {
   const [selectedTodoistIds, setSelectedTodoistIds] = useState([])
   const [selectedTodoistItemName, setSelectedTodoistItemName] = useState('')
   const [todoistCasesInput, setTodoistCasesInput] = useState('')
+  const [caseMatches, setCaseMatches] = useState([])
+  const [caseMatchesLoading, setCaseMatchesLoading] = useState(false)
+  const [selectedCase, setSelectedCase] = useState(null) // { variationId, name } | null
 
   // ── BATCH SCREEN (read-only display) ───────────
   const [batches, setBatches] = useState([])
@@ -110,11 +113,41 @@ export default function App() {
     if (activeCat === TODOIST_CAT_ID) loadTodoistItems()
   }, [activeCat, loadTodoistItems])
 
+  // ── LOAD CASE SKU MATCHES ───────────────────────
+  // Once you've picked which Todoist batch(es) you're logging, look up which
+  // Square case items look like the same product (e.g. a frozen 12ct case
+  // AND a fresh restaurant case for the same recipe) so you can say exactly
+  // which one this batch became. Defaults to whichever case you picked last
+  // time for this same item, if we have one on file.
+  useEffect(() => {
+    if (!selectedTodoistItemName) {
+      setCaseMatches([])
+      setSelectedCase(null)
+      return
+    }
+    setCaseMatchesLoading(true)
+    fetch(`/api/case-matches?itemName=${encodeURIComponent(selectedTodoistItemName)}`)
+      .then(r => r.json())
+      .then(data => {
+        const matches = Array.isArray(data.matches) ? data.matches : []
+        setCaseMatches(matches)
+        if (data.lastUsed && matches.some(m => m.variationId === data.lastUsed.variationId)) {
+          setSelectedCase(data.lastUsed)
+        } else {
+          setSelectedCase(null)
+        }
+      })
+      .catch(() => { setCaseMatches([]); setSelectedCase(null) })
+      .finally(() => setCaseMatchesLoading(false))
+  }, [selectedTodoistItemName])
+
   function resetSelections() {
     setActiveItem(null)
     setSelectedTodoistIds([])
     setSelectedTodoistItemName('')
     setTodoistCasesInput('')
+    setCaseMatches([])
+    setSelectedCase(null)
   }
 
   // ── LOG HELPERS (catalog items) ─────────────────
@@ -155,7 +188,7 @@ export default function App() {
 
   // ── LOG (AND PACKAGE) SELECTED TODOIST BATCHES ──
   async function logTodoistBatches() {
-    if (!selectedTodoistIds.length || !todoistCasesInput) return
+    if (!selectedTodoistIds.length || !todoistCasesInput || !selectedCase) return
     setLoggingTodoist(true)
     try {
       const firstItem = todoistItems.find(t => selectedTodoistIds.includes(t.taskId))
@@ -166,19 +199,23 @@ export default function App() {
           taskIds: selectedTodoistIds,
           itemName: selectedTodoistItemName,
           batchSize: firstItem?.batchSize || '1 Batch',
-          casesProduced: parseInt(todoistCasesInput)
+          casesProduced: parseInt(todoistCasesInput),
+          caseVariationId: selectedCase.variationId,
+          caseName: selectedCase.name
         })
       })
       const data = await r.json()
       if (data.error) throw new Error(data.error)
       showToast(
-        `Logged ${selectedTodoistIds.length} batch${selectedTodoistIds.length !== 1 ? 'es' : ''} of ${selectedTodoistItemName} — ${todoistCasesInput} cases`,
+        `Logged ${selectedTodoistIds.length} batch${selectedTodoistIds.length !== 1 ? 'es' : ''} of ${selectedCase.name} — ${todoistCasesInput} cases`,
         'info'
       )
       setTodoistItems(prev => prev.filter(t => !selectedTodoistIds.includes(t.taskId)))
       setSelectedTodoistIds([])
       setSelectedTodoistItemName('')
       setTodoistCasesInput('')
+      setCaseMatches([])
+      setSelectedCase(null)
     } catch (e) {
       showToast('Could not log batch: ' + e.message, 'error')
     }
@@ -368,23 +405,45 @@ export default function App() {
               selectedTodoistIds.length > 0 && (
                 <>
                   <div>
-                    <div style={s.sectionLabel}>Cases Produced</div>
-                    <div style={s.placeholder}>
-                      {selectedTodoistIds.length} batch{selectedTodoistIds.length !== 1 ? 'es' : ''} of <strong>{selectedTodoistItemName}</strong> selected. Enter the total cases made — this logs it as packaged and checks the task{selectedTodoistIds.length !== 1 ? 's' : ''} off in Todoist.
-                    </div>
-                    <input
-                      style={{ ...s.modalInput, fontSize: 24, fontWeight: 700, textAlign: 'center', padding: '14px', marginTop: 10 }}
-                      type="number" min="1"
-                      value={todoistCasesInput}
-                      onChange={e => setTodoistCasesInput(e.target.value)}
-                      placeholder="0"
-                      autoFocus
-                    />
+                    <div style={s.sectionLabel}>Which Case Is This?</div>
+                    {caseMatchesLoading && <div style={s.placeholder}>Looking for matching Square items…</div>}
+                    {!caseMatchesLoading && caseMatches.length === 0 && (
+                      <div style={s.placeholder}>
+                        No Square items found with a name like "{selectedTodoistItemName}". Check the item name in Square, or ask to have it renamed to match.
+                      </div>
+                    )}
+                    {!caseMatchesLoading && caseMatches.length > 0 && (
+                      <div style={s.itemGrid}>
+                        {caseMatches.map(m => (
+                          <button
+                            key={m.variationId}
+                            style={{ ...s.itemBtn, ...(selectedCase?.variationId === m.variationId ? s.itemActive : {}) }}
+                            onClick={() => setSelectedCase(m)}
+                          >{m.name}</button>
+                        ))}
+                      </div>
+                    )}
                   </div>
+                  {selectedCase && (
+                    <div>
+                      <div style={s.sectionLabel}>Cases Produced</div>
+                      <div style={s.placeholder}>
+                        {selectedTodoistIds.length} batch{selectedTodoistIds.length !== 1 ? 'es' : ''} of <strong>{selectedTodoistItemName}</strong> selected, packaging as <strong>{selectedCase.name}</strong>. Enter the total cases made — this logs it as packaged and checks the task{selectedTodoistIds.length !== 1 ? 's' : ''} off in Todoist.
+                      </div>
+                      <input
+                        style={{ ...s.modalInput, fontSize: 24, fontWeight: 700, textAlign: 'center', padding: '14px', marginTop: 10 }}
+                        type="number" min="1"
+                        value={todoistCasesInput}
+                        onChange={e => setTodoistCasesInput(e.target.value)}
+                        placeholder="0"
+                        autoFocus
+                      />
+                    </div>
+                  )}
                   <button
-                    style={{ ...s.btnGreen, opacity: (loggingTodoist || !todoistCasesInput) ? 0.5 : 1, cursor: (loggingTodoist || !todoistCasesInput) ? 'not-allowed' : 'pointer' }}
+                    style={{ ...s.btnGreen, opacity: (loggingTodoist || !todoistCasesInput || !selectedCase) ? 0.5 : 1, cursor: (loggingTodoist || !todoistCasesInput || !selectedCase) ? 'not-allowed' : 'pointer' }}
                     onClick={logTodoistBatches}
-                    disabled={loggingTodoist || !todoistCasesInput}
+                    disabled={loggingTodoist || !todoistCasesInput || !selectedCase}
                   >{loggingTodoist ? 'Logging…' : '✓ Log & Package'}</button>
                 </>
               )

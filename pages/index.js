@@ -1,5 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
 
+// Categories hidden from the Daily Log screen's Category row. These still
+// exist in Square — they're just not shown here. Edit this list to change
+// what's hidden (name match is case-insensitive).
+const HIDDEN_CATEGORIES = [
+  'Dry Goods',
+  'Cajun Market Meats Products',
+  'Battered Freezer',
+  'Raw Goods (frozen)',
+  'Raw Goods (Refrigerated)'
+]
+
 export default function App() {
   // ── SCREEN ─────────────────────────────────────
   const [screen, setScreen] = useState('log') // 'log' | 'batches'
@@ -226,6 +237,9 @@ export default function App() {
   const dateStr = today.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 
   const filteredItems = items.filter(i => i.categoryId === activeCat)
+  const visibleCategories = categories.filter(
+    cat => !HIDDEN_CATEGORIES.some(hidden => hidden.toLowerCase() === (cat.name || '').toLowerCase())
+  )
   const pendingBatches = batches.filter(b => b.status === 'cooked')
   const historyBatches = batches.filter(b => b.status === 'packaged')
   const totalUnits = log.reduce((s, e) => s + e.qty, 0)
@@ -298,7 +312,7 @@ export default function App() {
                     style={{ ...s.pill, ...s.pillTodoist, ...(activeCat === TODOIST_CAT_ID ? s.pillTodoistActive : {}) }}
                     onClick={() => { setActiveCat(TODOIST_CAT_ID); setActiveItem(null) }}
                   >Todoist</button>
-                  {categories.map(cat => (
+                  {visibleCategories.map(cat => (
                     <button
                       key={cat.id}
                       style={{ ...s.pill, ...(activeCat === cat.id ? s.pillActive : {}) }}

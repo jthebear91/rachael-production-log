@@ -20,6 +20,13 @@ export default function App() {
   const [pushResult, setPushResult] = useState(null) // 'success' | 'error'
   const [pushError, setPushError] = useState('')
 
+  // ── TODOIST CATEGORY (Daily Log) ────────────────
+  const TODOIST_CAT_ID = 'todoist'
+  const [todoistItems, setTodoistItems] = useState([])
+  const [todoistLoading, setTodoistLoading] = useState(false)
+  const [todoistError, setTodoistError] = useState('')
+  const [loggingTodoist, setLoggingTodoist] = useState(false)
+
   // ── BATCH SCREEN ───────────────────────────────
   const [batches, setBatches] = useState([])
   const [batchLoading, setBatchLoading] = useState(false)
@@ -29,7 +36,8 @@ export default function App() {
   const [packagingCases, setPackagingCases] = useState('')
   const [showPackageModal, setShowPackageModal] = useState(false)
   const [packaging, setPackaging] = useState(false)
-  const [batchTab, setBatchTab] = useState('pending') // 'pending' | 'history'
+  const [batchTab, setBatchTab] = useState('pending') // 'pending' | 'history' | 'byItem'
+  const [selectedHistoryItem, setSelectedHistoryItem] = useState(null) // item_name or null
 
   // ── STATUS TOAST ───────────────────────────────
   const [toast, setToast] = useState({ msg: '', type: '' })
@@ -69,6 +77,25 @@ export default function App() {
     if (screen === 'batches') loadBatches()
   }, [screen, loadBatches])
 
+  // ── LOAD TODOIST ITEMS (for the red category) ──
+  const loadTodoistItems = useCallback(async () => {
+    setTodoistLoading(true)
+    setTodoistError('')
+    try {
+      const r = await fetch('/api/todoist-tasks')
+      const data = await r.json()
+      setTodoistItems(Array.isArray(data) ? data : [])
+    } catch (e) {
+      setTodoistError('Could not load Todoist tasks')
+      setTodoistItems([])
+    }
+    setTodoistLoading(false)
+  }, [])
+
+  useEffect(() => {
+    if (activeCat === TODOIST_CAT_ID) loadTodoistItems()
+  }, [activeCat, loadTodoistItems])
+
   // ── LOG HELPERS ────────────────────────────────
   function addToLog() {
     if (!activeItem) return
@@ -83,6 +110,34 @@ export default function App() {
     }
     setActiveItem(null)
     setQty(1)
+  }
+
+  // ── LOG A TODOIST BATCH ─────────────────────────
+  // Tapping a Todoist item and confirming logs exactly one batch (matching
+  // that one Todoist task), so it always shows up in Batch Tracker without
+  // needing the manual "Sync from Todoist" button, and checks the task off
+  // in Todoist so it drops out of this list.
+  async function logTodoistBatch(item) {
+    setLoggingTodoist(true)
+    try {
+      const r = await fetch('/api/log-todoist-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          taskId: item.taskId,
+          itemName: item.itemName,
+          batchSize: item.batchSize
+        })
+      })
+      const data = await r.json()
+      if (data.error) throw new Error(data.error)
+      showToast(`Logged batch: ${item.itemName} (${item.batchSize})`, 'info')
+      setTodoistItems(prev => prev.filter(t => t.taskId !== item.taskId))
+      setActiveItem(null)
+    } catch (e) {
+      showToast('Could not log batch: ' + e.message, 'error')
+    }
+    setLoggingTodoist(false)
   }
 
   function removeFromLog(i) {
@@ -175,6 +230,22 @@ export default function App() {
   const historyBatches = batches.filter(b => b.status === 'packaged')
   const totalUnits = log.reduce((s, e) => s + e.qty, 0)
 
+  // ── BY-ITEM HISTORY (Batch Tracker "By Item" tab) ──
+  // Groups every logged batch by item name so you can see everything you've
+  // ever made, then drill into one item for its date-by-date history.
+  const itemNames = [...new Set(batches.map(b => b.item_name))].sort()
+  function batchesForItem(name) {
+    return batches
+      .filter(b => b.item_name === name)
+      .sort((a, b) => new Date(b.packaged_at || b.cooked_at) - new Date(a.packaged_at || a.cooked_at))
+  }
+  function averageCasesFor(name) {
+    const packaged = batches.filter(b => b.item_name === name && b.status === 'packaged' && b.cases_produced != null)
+    if (!packaged.length) return null
+    const sum = packaged.reduce((s, b) => s + Number(b.cases_produced), 0)
+    return (sum / packaged.length).toFixed(1)
+  }
+
   // ══════════════════════════════════════════════
   // RENDER
   // ══════════════════════════════════════════════
@@ -223,6 +294,10 @@ export default function App() {
               {catalogError && <div style={{ ...s.placeholder, color: 'var(--red)' }}>{catalogError}</div>}
               {!catalogLoading && !catalogError && (
                 <div style={s.pills}>
+                  <button
+                    style={{ ...s.pill, ...s.pillTodoist, ...(activeCat === TODOIST_CAT_ID ? s.pillTodoistActive : {}) }}
+                    onClick={() => { setActiveCat(TODOIST_CAT_ID); setActiveItem(null) }}
+                  >Todoist</button>
                   {categories.map(cat => (
                     <button
                       key={cat.id}
@@ -238,8 +313,32 @@ export default function App() {
             <div>
               <div style={s.sectionLabel}>Item</div>
               {!activeCat && <div style={s.placeholder}>Pick a category above</div>}
-              {activeCat && filteredItems.length === 0 && <div style={s.placeholder}>No items in this category</div>}
-              {activeCat && filteredItems.length > 0 && (
+
+              {/* TODOIST ITEMS */}
+              {activeCat === TODOIST_CAT_ID && (
+                <>
+                  {todoistLoading && <div style={s.placeholder}>Loading Todoist tasks…</div>}
+                  {todoistError && <div style={{ ...s.placeholder, color: 'var(--red)' }}>{todoistError}</div>}
+                  {!todoistLoading && !todoistError && todoistItems.length === 0 && (
+                    <div style={s.placeholder}>Nothing pending on Todoist right now.</div>
+                  )}
+                  {!todoistLoading && todoistItems.length > 0 && (
+                    <div style={s.itemGrid}>
+                      {todoistItems.map(item => (
+                        <button
+                          key={item.taskId}
+                          style={{ ...s.itemBtn, ...s.itemBtnTodoist, ...(activeItem?.taskId === item.taskId ? s.itemActive : {}) }}
+                          onClick={() => setActiveItem({ ...item, isTodoist: true })}
+                        >{item.batchSize} — {item.itemName}</button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* CATALOG ITEMS */}
+              {activeCat && activeCat !== TODOIST_CAT_ID && filteredItems.length === 0 && <div style={s.placeholder}>No items in this category</div>}
+              {activeCat && activeCat !== TODOIST_CAT_ID && filteredItems.length > 0 && (
                 <div style={s.itemGrid}>
                   {filteredItems.map(item => (
                     <button
@@ -252,30 +351,47 @@ export default function App() {
               )}
             </div>
 
-            {/* Qty */}
-            <div>
-              <div style={s.sectionLabel}>Quantity Produced</div>
-              <div style={s.qtyRow}>
-                <div style={s.stepper}>
-                  <button style={s.stepBtn} onClick={() => setQty(q => Math.max(1, q - 1))}>−</button>
-                  <input
-                    style={s.stepNum}
-                    type="number" min="1" max="999"
-                    value={qty}
-                    onChange={e => setQty(Math.max(1, parseInt(e.target.value) || 1))}
-                  />
-                  <button style={s.stepBtn} onClick={() => setQty(q => Math.min(999, q + 1))}>+</button>
+            {/* Qty + Add — Todoist items log straight to Batch Tracker instead */}
+            {activeItem?.isTodoist ? (
+              <>
+                <div>
+                  <div style={s.sectionLabel}>Logging From Todoist</div>
+                  <div style={s.placeholder}>
+                    This logs one batch of <strong>{activeItem.itemName}</strong> ({activeItem.batchSize}) to Batch Tracker and checks the task off in Todoist.
+                  </div>
                 </div>
-                <span style={s.qtyUnit}>cases / units</span>
-              </div>
-            </div>
+                <button
+                  style={{ ...s.btnGreen, opacity: loggingTodoist ? 0.6 : 1, cursor: loggingTodoist ? 'not-allowed' : 'pointer' }}
+                  onClick={() => logTodoistBatch(activeItem)}
+                  disabled={loggingTodoist}
+                >{loggingTodoist ? 'Logging…' : '✓ Log This Batch'}</button>
+              </>
+            ) : (
+              <>
+                <div>
+                  <div style={s.sectionLabel}>Quantity Produced</div>
+                  <div style={s.qtyRow}>
+                    <div style={s.stepper}>
+                      <button style={s.stepBtn} onClick={() => setQty(q => Math.max(1, q - 1))}>−</button>
+                      <input
+                        style={s.stepNum}
+                        type="number" min="1" max="999"
+                        value={qty}
+                        onChange={e => setQty(Math.max(1, parseInt(e.target.value) || 1))}
+                      />
+                      <button style={s.stepBtn} onClick={() => setQty(q => Math.min(999, q + 1))}>+</button>
+                    </div>
+                    <span style={s.qtyUnit}>cases / units</span>
+                  </div>
+                </div>
 
-            {/* Add button */}
-            <button
-              style={{ ...s.btnGreen, opacity: activeItem ? 1 : 0.35, cursor: activeItem ? 'pointer' : 'not-allowed' }}
-              onClick={addToLog}
-              disabled={!activeItem}
-            >+ Add to Today's Log</button>
+                <button
+                  style={{ ...s.btnGreen, opacity: activeItem ? 1 : 0.35, cursor: activeItem ? 'pointer' : 'not-allowed' }}
+                  onClick={addToLog}
+                  disabled={!activeItem}
+                >+ Add to Today's Log</button>
+              </>
+            )}
 
           </div>
 
@@ -337,6 +453,10 @@ export default function App() {
                 style={{ ...s.batchTab, ...(batchTab === 'history' ? s.batchTabActive : {}) }}
                 onClick={() => setBatchTab('history')}
               >Yield History ({historyBatches.length})</button>
+              <button
+                style={{ ...s.batchTab, ...(batchTab === 'byItem' ? s.batchTabActive : {}) }}
+                onClick={() => setBatchTab('byItem')}
+              >By Item ({itemNames.length})</button>
             </div>
             <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
               {syncMsg && <span style={{ fontSize: 12, color: 'var(--muted)' }}>{syncMsg}</span>}
@@ -413,6 +533,72 @@ export default function App() {
                 </div>
               </>
             )}
+
+            {/* BY ITEM */}
+            {batchTab === 'byItem' && !batchLoading && (
+              <>
+                {itemNames.length === 0 && (
+                  <div style={s.logEmpty}>Nothing made yet.<br /><br />Once you log or sync batches, every item you've made will show up here.</div>
+                )}
+                <div style={s.batchGrid}>
+                  {itemNames.map(name => {
+                    const entries = batchesForItem(name)
+                    const avg = averageCasesFor(name)
+                    return (
+                      <div
+                        key={name}
+                        style={s.batchCard}
+                        onClick={() => setSelectedHistoryItem(name)}
+                      >
+                        <div style={s.batchCardName}>{name}</div>
+                        <div style={s.batchCardSize}>{entries.length} batch{entries.length !== 1 ? 'es' : ''}</div>
+                        <div style={s.batchCardDate}>{avg ? `Avg ${avg} cases/batch` : 'No packaged batches yet'}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── ITEM HISTORY MODAL ── */}
+      {selectedHistoryItem && (
+        <div style={s.overlay} onClick={() => setSelectedHistoryItem(null)}>
+          <div style={{ ...s.modal, maxWidth: 560 }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+              <h2 style={s.modalH}>{selectedHistoryItem}</h2>
+              <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1.2, textTransform: 'uppercase', color: 'var(--muted)' }}>Average</div>
+                <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 26, color: 'var(--green)', letterSpacing: 1 }}>
+                  {averageCasesFor(selectedHistoryItem) || '—'} {averageCasesFor(selectedHistoryItem) ? 'cases' : ''}
+                </div>
+              </div>
+            </div>
+            <div style={{ ...s.historyTable, marginTop: 16, maxHeight: 360, overflowY: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                    {['Date', 'Batch Size', 'Amount Made'].map(h => (
+                      <th key={h} style={s.th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {batchesForItem(selectedHistoryItem).map((b, i) => (
+                    <tr key={b.id} style={{ background: i % 2 === 0 ? '#fff' : 'var(--bg)', borderBottom: '1px solid var(--border)' }}>
+                      <td style={s.td}>{fmtDate(b.packaged_at || b.cooked_at)}</td>
+                      <td style={s.td}>{b.batch_size}</td>
+                      <td style={s.td}>{b.status === 'packaged' ? `${b.cases_produced} cases` : 'Not packaged yet'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={s.modalBtns}>
+              <button style={s.btnGhost} onClick={() => setSelectedHistoryItem(null)}>Close</button>
+            </div>
           </div>
         </div>
       )}
@@ -547,6 +733,8 @@ const s = {
     fontSize: 13, fontWeight: 600, padding: '8px 18px', minHeight: 40, color: '#1c1c1c'
   },
   pillActive: { background: '#1c1c1c', borderColor: '#1c1c1c', color: '#fff' },
+  pillTodoist: { background: '#c0392b', borderColor: '#c0392b', color: '#fff', fontWeight: 700 },
+  pillTodoistActive: { background: '#8e2a1f', borderColor: '#8e2a1f' },
 
   itemGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(128px, 1fr))', gap: 8 },
   itemBtn: {
@@ -555,6 +743,7 @@ const s = {
     color: '#1c1c1c', textAlign: 'center', lineHeight: 1.3
   },
   itemActive: { background: '#1c1c1c', borderColor: '#1c1c1c', color: '#fff', fontWeight: 600 },
+  itemBtnTodoist: { borderColor: '#e6b3ac' },
 
   qtyRow: { display: 'flex', alignItems: 'center', gap: 14 },
   stepper: { display: 'flex', alignItems: 'center', border: '1.5px solid #e0ddd8', borderRadius: 8, background: '#fff', overflow: 'hidden' },

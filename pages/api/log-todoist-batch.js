@@ -13,7 +13,12 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Missing itemName, casesProduced, or taskIds' })
   }
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  // Trim stray whitespace/newlines and any trailing "/rest/v1" or slash that
+  // may have been pasted into the Vercel env var by accident — either one
+  // would corrupt the request path and the Supabase gateway would reject it
+  // with a routing error (PGRST125) rather than a normal database error.
+  let supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim()
+  supabaseUrl = supabaseUrl.replace(/\/+$/, '').replace(/\/rest\/v1$/, '')
   const serviceKey = process.env.SUPABASE_SERVICE_KEY
   const todoistToken = process.env.TODOIST_TOKEN
 
@@ -31,7 +36,9 @@ export default async function handler(req, res) {
       cases_produced: casesProduced
     }
 
-    const sbRes = await fetch(`${supabaseUrl}/rest/v1/batches`, {
+    // on_conflict tells Supabase which column identifies a "duplicate" —
+    // required for resolution=merge-duplicates to know what to match on.
+    const sbRes = await fetch(`${supabaseUrl}/rest/v1/batches?on_conflict=todoist_task_id`, {
       method: 'POST',
       headers: {
         'apikey': serviceKey,

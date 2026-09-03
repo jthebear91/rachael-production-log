@@ -1,26 +1,34 @@
-// Logs a single Todoist "Package" task as a cooked batch in Supabase, then
-// marks that task complete in Todoist. This is what the red Todoist category
-// on the Daily Log screen calls when you tap an item and log it — it's the
-// same effect as the bulk "Sync from Todoist" button, but for one task at
-// the moment you log it, so Batch Tracker updates automatically without a
-// separate manual sync step.
+// Logs one or more Todoist "Package" tasks as ONE combined, already-packaged
+// batch in Supabase — merging same-item batches together when more than one
+// task is selected — then marks every included task complete in Todoist.
+//
+// This is called straight from the Daily Log's Todoist category, in one
+// step: you pick the batch(es), enter the cases produced, and it's done —
+// Batch Tracker just displays the result, no separate packaging step there.
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end()
 
-  const { taskId, itemName, batchSize } = req.body
-  if (!itemName) return res.status(400).json({ error: 'Missing itemName' })
+  const { taskIds, itemName, batchSize, casesProduced } = req.body
+  if (!itemName || !casesProduced || !Array.isArray(taskIds) || !taskIds.length) {
+    return res.status(400).json({ error: 'Missing itemName, casesProduced, or taskIds' })
+  }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const serviceKey = process.env.SUPABASE_SERVICE_KEY
   const todoistToken = process.env.TODOIST_TOKEN
 
   try {
+    const now = new Date().toISOString()
     const body = {
-      todoist_task_id: taskId ? String(taskId) : `manual-${Date.now()}`,
+      todoist_task_id: String(taskIds[0]),
       item_name: itemName,
-      batch_size: batchSize || '1 Batch',
-      cooked_at: new Date().toISOString(),
-      status: 'cooked'
+      batch_size: taskIds.length > 1
+        ? `${taskIds.length} batches — ${batchSize || '1 Batch'}`
+        : (batchSize || '1 Batch'),
+      cooked_at: now,
+      packaged_at: now,
+      status: 'packaged',
+      cases_produced: casesProduced
     }
 
     const sbRes = await fetch(`${supabaseUrl}/rest/v1/batches`, {
@@ -39,17 +47,16 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: errText })
     }
 
-    // Best-effort: mark the task complete in Todoist so it drops off the
-    // Daily Log's Todoist category. Not fatal if this fails.
-    if (taskId && todoistToken) {
-      try {
-        await fetch(`https://api.todoist.com/api/v1/tasks/${taskId}/close`, {
+    // Best-effort: check off every included task in Todoist so they drop
+    // out of the Daily Log's Todoist category. Not fatal if this fails —
+    // the batch is already logged, which is what matters most.
+    if (todoistToken) {
+      await Promise.all(taskIds.map(id =>
+        fetch(`https://api.todoist.com/api/v1/tasks/${id}/close`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${todoistToken}` }
-        })
-      } catch (e) {
-        // ignore — the batch is already logged, that's what matters
-      }
+        }).catch(() => {})
+      ))
     }
 
     res.status(200).json({ success: true })

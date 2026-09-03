@@ -245,6 +245,14 @@ export default function App() {
   )
   const pendingBatches = batches.filter(b => b.status === 'cooked')
   const historyBatches = batches.filter(b => b.status === 'packaged')
+
+  // If everything currently selected for packaging is the same item, the
+  // backend will merge them into one combined record instead of splitting
+  // the total evenly across each batch — reflect that in the modal copy.
+  const selectedBatchItemNames = [...new Set(
+    selectedBatches.map(id => batches.find(b => b.id === id)?.item_name).filter(Boolean)
+  )]
+  const willMergeSelectedBatches = selectedBatches.length > 1 && selectedBatchItemNames.length === 1
   const totalUnits = log.reduce((s, e) => s + e.qty, 0)
 
   // ── BY-ITEM HISTORY (Batch Tracker "By Item" tab) ──
@@ -650,7 +658,9 @@ export default function App() {
           <div style={s.modal}>
             <h2 style={s.modalH}>Package Batches</h2>
             <p style={s.modalSub}>
-              You selected {selectedBatches.length} batch{selectedBatches.length !== 1 ? 'es' : ''}. Enter the total cases produced across all of them — the yield will be split evenly.
+              {willMergeSelectedBatches
+                ? `You selected ${selectedBatches.length} batches of ${selectedBatchItemNames[0]}. Enter the total cases produced — they'll be combined into one entry.`
+                : `You selected ${selectedBatches.length} batch${selectedBatches.length !== 1 ? 'es' : ''}. Enter the total cases produced across all of them — the yield will be split evenly.`}
             </p>
             <div style={{ margin: '20px 0' }}>
               <label style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.4, textTransform: 'uppercase', color: 'var(--muted)', display: 'block', marginBottom: 8 }}>

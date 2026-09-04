@@ -39,7 +39,7 @@ export default function App() {
   // but a single batch can be SPLIT across more than one case (e.g. part
   // fresh soup base, part turned into crab and corn) — so it's always an
   // array. Each row: { rowId, variationId, name, cases }.
-  const [caseSplits, setCaseSplits] = useState([{ rowId: 0, variationId: '', name: '', cases: '' }])
+  const [caseSplits, setCaseSplits] = useState([{ rowId: 0, variationId: '', name: '', cases: '', search: '' }])
 
   // ── BATCH SCREEN (read-only display) ───────────
   const [batches, setBatches] = useState([])
@@ -116,7 +116,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedTodoistItemName) {
       setCaseMatches([])
-      setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '' }])
+      setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '', search: '' }])
       return
     }
     setCaseMatchesLoading(true)
@@ -130,12 +130,13 @@ export default function App() {
           rowId: 0,
           variationId: lastUsedValid ? data.lastUsed.variationId : '',
           name: lastUsedValid ? data.lastUsed.name : '',
-          cases: ''
+          cases: '',
+          search: ''
         }])
       })
       .catch(() => {
         setCaseMatches([])
-        setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '' }])
+        setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '', search: '' }])
       })
       .finally(() => setCaseMatchesLoading(false))
   }, [selectedTodoistItemName])
@@ -145,7 +146,7 @@ export default function App() {
     setSelectedTodoistIds([])
     setSelectedTodoistItemName('')
     setCaseMatches([])
-    setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '' }])
+    setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '', search: '' }])
   }
 
   // ── CASE SPLIT HELPERS ──────────────────────────
@@ -155,8 +156,11 @@ export default function App() {
   function setSplitCases(rowId, value) {
     setCaseSplits(prev => prev.map(r => r.rowId === rowId ? { ...r, cases: value } : r))
   }
+  function setSplitSearch(rowId, value) {
+    setCaseSplits(prev => prev.map(r => r.rowId === rowId ? { ...r, search: value } : r))
+  }
   function addSplitRow() {
-    setCaseSplits(prev => [...prev, { rowId: (prev[prev.length - 1]?.rowId ?? 0) + 1, variationId: '', name: '', cases: '' }])
+    setCaseSplits(prev => [...prev, { rowId: (prev[prev.length - 1]?.rowId ?? 0) + 1, variationId: '', name: '', cases: '', search: '' }])
   }
   function removeSplitRow(rowId) {
     setCaseSplits(prev => prev.length > 1 ? prev.filter(r => r.rowId !== rowId) : prev)
@@ -234,7 +238,7 @@ export default function App() {
       setSelectedTodoistIds([])
       setSelectedTodoistItemName('')
       setCaseMatches([])
-      setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '' }])
+      setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '', search: '' }])
     } catch (e) {
       showToast('Could not log batch: ' + e.message, 'error')
     }
@@ -286,6 +290,12 @@ export default function App() {
   const visibleCategories = categories.filter(
     cat => !HIDDEN_CATEGORIES.some(hidden => hidden.toLowerCase() === (cat.name || '').toLowerCase())
   )
+  // Every catalog item in a visible category — used as the searchable
+  // fallback in the case picker, so a naming mismatch between Todoist and
+  // Square (plurals, abbreviations, however it happens to be typed) never
+  // leaves you unable to find the right item — you can always search for it.
+  const visibleCategoryIds = new Set(visibleCategories.map(c => c.id))
+  const visibleCaseItems = items.filter(i => i.categoryIds.some(id => visibleCategoryIds.has(id)))
   const pendingBatches = batches.filter(b => b.status === 'cooked')
   const historyBatches = batches.filter(b => b.status === 'packaged')
   const totalUnits = log.reduce((s, e) => s + e.qty, 0)
@@ -434,43 +444,76 @@ export default function App() {
 
                   {!caseMatchesLoading && caseMatches.length === 0 && (
                     <div style={s.placeholder}>
-                      No Square items found with a name like "{selectedTodoistItemName}". Check the item name in Square, or ask to have it renamed to match.
+                      No close name match for "{selectedTodoistItemName}" — use the search box below to find it by hand.
                     </div>
                   )}
 
-                  {!caseMatchesLoading && caseMatches.length > 0 && caseSplits.map((row, idx) => (
-                    <div key={row.rowId} style={{ ...s.placeholder, background: '#f7f5f1', borderRadius: 10, padding: 14, marginBottom: 10 }}>
-                      {caseSplits.length > 1 && (
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                          <div style={{ ...s.sectionLabel, marginBottom: 0 }}>Case {idx + 1}</div>
-                          <button
-                            style={{ background: 'none', border: 'none', color: '#b3261e', fontSize: 13, cursor: 'pointer', padding: 0 }}
-                            onClick={() => removeSplitRow(row.rowId)}
-                          >Remove</button>
-                        </div>
-                      )}
-                      <div style={s.itemGrid}>
-                        {caseMatches.map(m => (
-                          <button
-                            key={m.variationId}
-                            style={{ ...s.itemBtn, ...(row.variationId === m.variationId ? s.itemActive : {}) }}
-                            onClick={() => setSplitCase(row.rowId, m)}
-                          >{m.name}</button>
-                        ))}
-                      </div>
-                      {row.variationId && (
-                        <input
-                          style={{ ...s.modalInput, fontSize: 20, fontWeight: 700, textAlign: 'center', padding: '12px', marginTop: 10 }}
-                          type="number" min="1"
-                          value={row.cases}
-                          onChange={e => setSplitCases(row.rowId, e.target.value)}
-                          placeholder="Cases produced"
-                        />
-                      )}
-                    </div>
-                  ))}
+                  {!caseMatchesLoading && caseSplits.map((row, idx) => {
+                    const searchText = row.search.trim().toLowerCase()
+                    const searchResults = searchText
+                      ? visibleCaseItems.filter(i => i.name.toLowerCase().includes(searchText)).slice(0, 12)
+                      : []
+                    return (
+                      <div key={row.rowId} style={{ ...s.placeholder, background: '#f7f5f1', borderRadius: 10, padding: 14, marginBottom: 10 }}>
+                        {caseSplits.length > 1 && (
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                            <div style={{ ...s.sectionLabel, marginBottom: 0 }}>Case {idx + 1}</div>
+                            <button
+                              style={{ background: 'none', border: 'none', color: '#b3261e', fontSize: 13, cursor: 'pointer', padding: 0 }}
+                              onClick={() => removeSplitRow(row.rowId)}
+                            >Remove</button>
+                          </div>
+                        )}
 
-                  {!caseMatchesLoading && caseMatches.length > 0 && (
+                        {caseMatches.length > 0 && (
+                          <div style={s.itemGrid}>
+                            {caseMatches.map(m => (
+                              <button
+                                key={m.variationId}
+                                style={{ ...s.itemBtn, ...(row.variationId === m.variationId ? s.itemActive : {}) }}
+                                onClick={() => setSplitCase(row.rowId, m)}
+                              >{m.name}</button>
+                            ))}
+                          </div>
+                        )}
+
+                        <input
+                          style={{ ...s.modalInput, marginTop: caseMatches.length > 0 ? 10 : 0 }}
+                          type="text"
+                          value={row.search}
+                          onChange={e => setSplitSearch(row.rowId, e.target.value)}
+                          placeholder="Not listed? Search all items by name…"
+                        />
+                        {searchText && (
+                          searchResults.length > 0 ? (
+                            <div style={{ ...s.itemGrid, marginTop: 10 }}>
+                              {searchResults.map(m => (
+                                <button
+                                  key={m.variationId}
+                                  style={{ ...s.itemBtn, ...(row.variationId === m.variationId ? s.itemActive : {}) }}
+                                  onClick={() => setSplitCase(row.rowId, m)}
+                                >{m.name}</button>
+                              ))}
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 13, color: '#888', marginTop: 8 }}>No visible items match "{row.search}".</div>
+                          )
+                        )}
+
+                        {row.variationId && (
+                          <input
+                            style={{ ...s.modalInput, fontSize: 20, fontWeight: 700, textAlign: 'center', padding: '12px', marginTop: 10 }}
+                            type="number" min="1"
+                            value={row.cases}
+                            onChange={e => setSplitCases(row.rowId, e.target.value)}
+                            placeholder="Cases produced"
+                          />
+                        )}
+                      </div>
+                    )
+                  })}
+
+                  {!caseMatchesLoading && (
                     <button
                       style={{ background: 'none', border: '1.5px dashed #c9c4bb', borderRadius: 8, padding: '10px', color: '#555', cursor: 'pointer', marginBottom: 14 }}
                       onClick={addSplitRow}

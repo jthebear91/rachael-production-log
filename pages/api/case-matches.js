@@ -14,12 +14,28 @@ import { HIDDEN_CATEGORIES } from '../../lib/hidden-categories'
 
 const STOPWORDS = new Set(['of', 'and', 'the', 'a', 'an', 'with', 'for'])
 
+// Light plural stemming so "jalapenos" (Todoist) and "jalapeno" (Square)
+// count as the same word — without this, singular/plural mismatches
+// between how a batch is named in Todoist vs. Square silently hid the
+// correct match.
+function stem(w) {
+  if (w.length > 4 && w.endsWith('es')) return w.slice(0, -2)
+  if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) return w.slice(0, -1)
+  return w
+}
+
 function words(name) {
   return (name || '')
+    // Strip accents (jalapeño → jalapeno) BEFORE dropping non-letters —
+    // otherwise an accented character gets replaced with a space and
+    // splits the word in two (jalapeño → "jalape" + "os"), silently
+    // hiding the item from every match.
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter(w => w && !STOPWORDS.has(w))
+    .map(stem)
 }
 
 // Counts shared words, but requires a real amount of overlap before it

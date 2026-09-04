@@ -4,7 +4,13 @@
 // fresh restaurant case, say) — so Daily Log can offer them as a short
 // pick-list instead of the whole catalog. Also returns whichever case was
 // picked last time for this exact item name, so that can be pre-selected.
+//
+// Only items in a VISIBLE category (per HIDDEN_CATEGORIES) are eligible —
+// raw ingredients and location categories aren't finished products you'd
+// package a batch into, so they're filtered out the same way they're
+// hidden from the Daily Log's category row.
 import { fetchCatalog } from '../../lib/square-catalog'
+import { HIDDEN_CATEGORIES } from '../../lib/hidden-categories'
 
 const STOPWORDS = new Set(['of', 'and', 'the', 'a', 'an', 'with', 'for'])
 
@@ -34,10 +40,21 @@ export default async function handler(req, res) {
   const serviceKey = process.env.SUPABASE_SERVICE_KEY
 
   try {
-    const { items } = await fetchCatalog()
+    const { items, categories } = await fetchCatalog()
+
+    // Which category ids are hidden, by name (case-insensitive) — same
+    // rule the Daily Log category row uses.
+    const hiddenIds = new Set(
+      categories
+        .filter(c => HIDDEN_CATEGORIES.some(h => h.toLowerCase() === (c.name || '').toLowerCase()))
+        .map(c => c.id)
+    )
+    // Keep an item only if at least one of its categories is NOT hidden.
+    const visibleItems = items.filter(i => (i.categoryIds || []).some(id => !hiddenIds.has(id)))
+
     const itemWords = words(itemName)
 
-    const scored = items
+    const scored = visibleItems
       .map(i => ({ ...i, score: scoreMatch(itemWords, words(i.name)) }))
       .filter(i => i.score > 0)
       .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))

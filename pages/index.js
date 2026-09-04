@@ -45,10 +45,13 @@ export default function App() {
   const [loggingTodoist, setLoggingTodoist] = useState(false)
   const [selectedTodoistIds, setSelectedTodoistIds] = useState([])
   const [selectedTodoistItemName, setSelectedTodoistItemName] = useState('')
-  const [todoistCasesInput, setTodoistCasesInput] = useState('')
   const [caseMatches, setCaseMatches] = useState([])
   const [caseMatchesLoading, setCaseMatchesLoading] = useState(false)
-  const [selectedCase, setSelectedCase] = useState(null) // { variationId, name } | null
+  // One row per finished case this selection is becoming. Usually just one,
+  // but a single batch can be SPLIT across more than one case (e.g. part
+  // fresh soup base, part turned into crab and corn) — so it's always an
+  // array. Each row: { rowId, variationId, name, cases }.
+  const [caseSplits, setCaseSplits] = useState([{ rowId: 0, variationId: '', name: '', cases: '' }])
 
   // ── BATCH SCREEN (read-only display) ───────────
   const [batches, setBatches] = useState([])
@@ -81,7 +84,10 @@ export default function App() {
   const loadBatches = useCallback(async () => {
     setBatchLoading(true)
     try {
-      const r = await fetch('/api/get-batches')
+      // cache: 'no-store' + a cache-busting query param so a freshly logged
+      // batch always shows up right away, even if something in between
+      // (the browser, a proxy) would otherwise cache the GET response.
+      const r = await fetch(`/api/get-batches?t=${Date.now()}`, { cache: 'no-store' })
       const data = await r.json()
       setBatches(Array.isArray(data) ? data : [])
     } catch (e) {
@@ -99,7 +105,7 @@ export default function App() {
     setTodoistLoading(true)
     setTodoistError('')
     try {
-      const r = await fetch('/api/todoist-tasks')
+      const r = await fetch(`/api/todoist-tasks?t=${Date.now()}`, { cache: 'no-store' })
       const data = await r.json()
       setTodoistItems(Array.isArray(data) ? data : [])
     } catch (e) {
@@ -122,7 +128,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedTodoistItemName) {
       setCaseMatches([])
-      setSelectedCase(null)
+      setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '' }])
       return
     }
     setCaseMatchesLoading(true)
@@ -131,13 +137,18 @@ export default function App() {
       .then(data => {
         const matches = Array.isArray(data.matches) ? data.matches : []
         setCaseMatches(matches)
-        if (data.lastUsed && matches.some(m => m.variationId === data.lastUsed.variationId)) {
-          setSelectedCase(data.lastUsed)
-        } else {
-          setSelectedCase(null)
-        }
+        const lastUsedValid = data.lastUsed && matches.some(m => m.variationId === data.lastUsed.variationId)
+        setCaseSplits([{
+          rowId: 0,
+          variationId: lastUsedValid ? data.lastUsed.variationId : '',
+          name: lastUsedValid ? data.lastUsed.name : '',
+          cases: ''
+        }])
       })
-      .catch(() => { setCaseMatches([]); setSelectedCase(null) })
+      .catch(() => {
+        setCaseMatches([])
+        setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '' }])
+      })
       .finally(() => setCaseMatchesLoading(false))
   }, [selectedTodoistItemName])
 
@@ -145,10 +156,24 @@ export default function App() {
     setActiveItem(null)
     setSelectedTodoistIds([])
     setSelectedTodoistItemName('')
-    setTodoistCasesInput('')
     setCaseMatches([])
-    setSelectedCase(null)
+    setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '' }])
   }
+
+  // ── CASE SPLIT HELPERS ──────────────────────────
+  function setSplitCase(rowId, match) {
+    setCaseSplits(prev => prev.map(r => r.rowId === rowId ? { ...r, variationId: match.variationId, name: match.name } : r))
+  }
+  function setSplitCases(rowId, value) {
+    setCaseSplits(prev => prev.map(r => r.rowId === rowId ? { ...r, cases: value } : r))
+  }
+  function addSplitRow() {
+    setCaseSplits(prev => [...prev, { rowId: (prev[prev.length - 1]?.rowId ?? 0) + 1, variationId: '', name: '', cases: '' }])
+  }
+  function removeSplitRow(rowId) {
+    setCaseSplits(prev => prev.length > 1 ? prev.filter(r => r.rowId !== rowId) : prev)
+  }
+  const splitsReady = caseSplits.length > 0 && caseSplits.every(r => r.variationId && r.cases && parseInt(r.cases) > 0)
 
   // ── LOG HELPERS (catalog items) ─────────────────
   function addToLog() {
@@ -188,10 +213,15 @@ export default function App() {
 
   // ── LOG (AND PACKAGE) SELECTED TODOIST BATCHES ──
   async function logTodoistBatches() {
-    if (!selectedTodoistIds.length || !todoistCasesInput || !selectedCase) return
+    if (!selectedTodoistIds.length || !splitsReady) return
     setLoggingTodoist(true)
     try {
       const firstItem = todoistItems.find(t => selectedTodoistIds.includes(t.taskId))
+      const splits = caseSplits.map(r => ({
+        caseVariationId: r.variationId,
+        caseName: r.name,
+        casesProduced: parseInt(r.cases)
+      }))
       const r = await fetch('/api/log-todoist-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -199,23 +229,24 @@ export default function App() {
           taskIds: selectedTodoistIds,
           itemName: selectedTodoistItemName,
           batchSize: firstItem?.batchSize || '1 Batch',
-          casesProduced: parseInt(todoistCasesInput),
-          caseVariationId: selectedCase.variationId,
-          caseName: selectedCase.name
+          splits
         })
       })
       const data = await r.json()
       if (data.error) throw new Error(data.error)
+      const summary = splits.length > 1
+        ? splits.map(sp => `${sp.casesProduced} ${sp.caseName}`).join(' + ')
+        : `${splits[0].casesProduced} cases of ${splits[0].caseName}`
       showToast(
-        `Logged ${selectedTodoistIds.length} batch${selectedTodoistIds.length !== 1 ? 'es' : ''} of ${selectedCase.name} — ${todoistCasesInput} cases`,
-        'info'
+        `Logged ${selectedTodoistIds.length} batch${selectedTodoistIds.length !== 1 ? 'es' : ''} of ${selectedTodoistItemName} — ${summary}` +
+        (data.squareWarning ? ` (${data.squareWarning})` : ''),
+        data.squareWarning ? 'error' : 'info'
       )
       setTodoistItems(prev => prev.filter(t => !selectedTodoistIds.includes(t.taskId)))
       setSelectedTodoistIds([])
       setSelectedTodoistItemName('')
-      setTodoistCasesInput('')
       setCaseMatches([])
-      setSelectedCase(null)
+      setCaseSplits([{ rowId: 0, variationId: '', name: '', cases: '' }])
     } catch (e) {
       showToast('Could not log batch: ' + e.message, 'error')
     }
@@ -404,46 +435,64 @@ export default function App() {
             {activeCat === TODOIST_CAT_ID ? (
               selectedTodoistIds.length > 0 && (
                 <>
-                  <div>
-                    <div style={s.sectionLabel}>Which Case Is This?</div>
-                    {caseMatchesLoading && <div style={s.placeholder}>Looking for matching Square items…</div>}
-                    {!caseMatchesLoading && caseMatches.length === 0 && (
-                      <div style={s.placeholder}>
-                        No Square items found with a name like "{selectedTodoistItemName}". Check the item name in Square, or ask to have it renamed to match.
-                      </div>
-                    )}
-                    {!caseMatchesLoading && caseMatches.length > 0 && (
+                  <div style={s.placeholder}>
+                    {selectedTodoistIds.length} batch{selectedTodoistIds.length !== 1 ? 'es' : ''} of <strong>{selectedTodoistItemName}</strong> selected.
+                    {caseSplits.length === 1
+                      ? ' Pick the case it became and how many cases you made.'
+                      : ' Split across the cases below — add up to however many destinations you need.'}
+                  </div>
+
+                  {caseMatchesLoading && <div style={s.placeholder}>Looking for matching Square items…</div>}
+
+                  {!caseMatchesLoading && caseMatches.length === 0 && (
+                    <div style={s.placeholder}>
+                      No Square items found with a name like "{selectedTodoistItemName}". Check the item name in Square, or ask to have it renamed to match.
+                    </div>
+                  )}
+
+                  {!caseMatchesLoading && caseMatches.length > 0 && caseSplits.map((row, idx) => (
+                    <div key={row.rowId} style={{ ...s.placeholder, background: '#f7f5f1', borderRadius: 10, padding: 14, marginBottom: 10 }}>
+                      {caseSplits.length > 1 && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                          <div style={{ ...s.sectionLabel, marginBottom: 0 }}>Case {idx + 1}</div>
+                          <button
+                            style={{ background: 'none', border: 'none', color: '#b3261e', fontSize: 13, cursor: 'pointer', padding: 0 }}
+                            onClick={() => removeSplitRow(row.rowId)}
+                          >Remove</button>
+                        </div>
+                      )}
                       <div style={s.itemGrid}>
                         {caseMatches.map(m => (
                           <button
                             key={m.variationId}
-                            style={{ ...s.itemBtn, ...(selectedCase?.variationId === m.variationId ? s.itemActive : {}) }}
-                            onClick={() => setSelectedCase(m)}
+                            style={{ ...s.itemBtn, ...(row.variationId === m.variationId ? s.itemActive : {}) }}
+                            onClick={() => setSplitCase(row.rowId, m)}
                           >{m.name}</button>
                         ))}
                       </div>
-                    )}
-                  </div>
-                  {selectedCase && (
-                    <div>
-                      <div style={s.sectionLabel}>Cases Produced</div>
-                      <div style={s.placeholder}>
-                        {selectedTodoistIds.length} batch{selectedTodoistIds.length !== 1 ? 'es' : ''} of <strong>{selectedTodoistItemName}</strong> selected, packaging as <strong>{selectedCase.name}</strong>. Enter the total cases made — this logs it as packaged and checks the task{selectedTodoistIds.length !== 1 ? 's' : ''} off in Todoist.
-                      </div>
-                      <input
-                        style={{ ...s.modalInput, fontSize: 24, fontWeight: 700, textAlign: 'center', padding: '14px', marginTop: 10 }}
-                        type="number" min="1"
-                        value={todoistCasesInput}
-                        onChange={e => setTodoistCasesInput(e.target.value)}
-                        placeholder="0"
-                        autoFocus
-                      />
+                      {row.variationId && (
+                        <input
+                          style={{ ...s.modalInput, fontSize: 20, fontWeight: 700, textAlign: 'center', padding: '12px', marginTop: 10 }}
+                          type="number" min="1"
+                          value={row.cases}
+                          onChange={e => setSplitCases(row.rowId, e.target.value)}
+                          placeholder="Cases produced"
+                        />
+                      )}
                     </div>
+                  ))}
+
+                  {!caseMatchesLoading && caseMatches.length > 0 && (
+                    <button
+                      style={{ background: 'none', border: '1.5px dashed #c9c4bb', borderRadius: 8, padding: '10px', color: '#555', cursor: 'pointer', marginBottom: 14 }}
+                      onClick={addSplitRow}
+                    >+ Split into another case</button>
                   )}
+
                   <button
-                    style={{ ...s.btnGreen, opacity: (loggingTodoist || !todoistCasesInput || !selectedCase) ? 0.5 : 1, cursor: (loggingTodoist || !todoistCasesInput || !selectedCase) ? 'not-allowed' : 'pointer' }}
+                    style={{ ...s.btnGreen, opacity: (loggingTodoist || !splitsReady) ? 0.5 : 1, cursor: (loggingTodoist || !splitsReady) ? 'not-allowed' : 'pointer' }}
                     onClick={logTodoistBatches}
-                    disabled={loggingTodoist || !todoistCasesInput || !selectedCase}
+                    disabled={loggingTodoist || !splitsReady}
                   >{loggingTodoist ? 'Logging…' : '✓ Log & Package'}</button>
                 </>
               )

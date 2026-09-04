@@ -3,6 +3,7 @@
 // category. Does not write anything, and does not touch Supabase.
 export default async function handler(req, res) {
   const token = process.env.TODOIST_TOKEN
+  res.setHeader('Cache-Control', 'no-store')
 
   try {
     const projectsRes = await fetch('https://api.todoist.com/api/v1/projects', {

@@ -22,11 +22,17 @@ function words(name) {
     .filter(w => w && !STOPWORDS.has(w))
 }
 
+// Counts shared words, but requires a real amount of overlap before it
+// counts as a match at all — a single common word like "base" or "corn"
+// matching "Chicken Base" or "Corn Starch" isn't a real match, it's just
+// noise. A 1-word item name (like "gumbo") needs that one word to match;
+// anything longer needs at least half its words to match, and at least 2.
 function scoreMatch(itemWords, catalogWords) {
   const catSet = new Set(catalogWords)
   let shared = 0
   itemWords.forEach(w => { if (catSet.has(w)) shared++ })
-  return shared
+  const threshold = itemWords.length <= 1 ? 1 : Math.max(2, Math.ceil(itemWords.length / 2))
+  return shared >= threshold ? shared : 0
 }
 
 export default async function handler(req, res) {

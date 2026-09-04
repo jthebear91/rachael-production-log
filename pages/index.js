@@ -482,7 +482,7 @@ export default function App() {
                           type="text"
                           value={row.search}
                           onChange={e => setSplitSearch(row.rowId, e.target.value)}
-                          placeholder="Not listed? Search all items by name…"
+                          placeholder="Search all items…"
                         />
                         {searchText && (
                           searchResults.length > 0 ? (

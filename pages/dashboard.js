@@ -1,15 +1,24 @@
 import { formatUsdFromCents } from '../lib/chicago-time'
 import { loadDashboardSales } from '../lib/square-sales'
 
-function moneyCell(period) {
-  if (!period) return '—'
-  return formatUsdFromCents(period.amount, period.currency)
+function MoneyValue({ period }) {
+  if (!period) {
+    return (
+      <div style={{ ...s.cardValue, fontFamily: 'Inter, sans-serif', fontSize: 28, color: 'var(--muted)' }}>—</div>
+    )
+  }
+  return <div style={s.cardValue}>{formatUsdFromCents(period.amount, period.currency)}</div>
 }
 
 function countCell(period) {
   if (!period) return ''
   const n = period.paymentCount || 0
   return `${n} payment${n === 1 ? '' : 's'}`
+}
+
+function moneyCell(period) {
+  if (!period) return '—'
+  return formatUsdFromCents(period.amount, period.currency)
 }
 
 function asOfLabel(iso, timeZone) {
@@ -55,17 +64,17 @@ export default function Dashboard({ payload }) {
           <div style={s.cards}>
             <div style={s.card}>
               <div style={s.cardLabel}>Today</div>
-              <div style={s.cardValue}>{moneyCell(combined.today)}</div>
+              <MoneyValue period={combined.today} />
               <div style={s.cardMeta}>{countCell(combined.today)}</div>
             </div>
             <div style={s.card}>
               <div style={s.cardLabel}>Week to date</div>
-              <div style={s.cardValue}>{moneyCell(combined.wtd)}</div>
+              <MoneyValue period={combined.wtd} />
               <div style={s.cardMeta}>{countCell(combined.wtd)}</div>
             </div>
             <div style={s.card}>
               <div style={s.cardLabel}>Month to date</div>
-              <div style={s.cardValue}>{moneyCell(combined.mtd)}</div>
+              <MoneyValue period={combined.mtd} />
               <div style={s.cardMeta}>{countCell(combined.mtd)}</div>
             </div>
           </div>

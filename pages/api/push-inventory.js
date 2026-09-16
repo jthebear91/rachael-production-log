@@ -1,8 +1,8 @@
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end()
 
-  const token = process.env.SQUARE_TOKEN
-  const locationId = process.env.SQUARE_LOCATION_ID
+  const token = process.env.SQUARE_WHOLESALE_TOKEN || process.env.SQUARE_TOKEN
+  const locationId = process.env.SQUARE_WHOLESALE_LOCATION_ID || process.env.SQUARE_LOCATION_ID
 
   const { entries } = req.body
   if (!entries || !entries.length) return res.status(400).json({ error: 'No entries' })

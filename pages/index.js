@@ -330,6 +330,7 @@ export default function App() {
         </div>
         <div style={s.hright}>
           <span style={s.hdate}>{dayName}, {dateStr}</span>
+          <a href="/dashboard" style={{ ...s.tabBtn, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>Sales</a>
           <button
             style={{ ...s.tabBtn, ...(screen === 'log' ? s.tabActive : {}) }}
             onClick={() => setScreen('log')}

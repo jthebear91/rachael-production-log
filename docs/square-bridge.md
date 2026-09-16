@@ -1,11 +1,12 @@
 # Square read-only bridge
 
-HTTP API for assistants to **read** Square catalog, inventory, orders, and payments from this app. It does **not** create orders, take payments, or adjust inventory.
+HTTP API for assistants to **read** Square catalog, inventory, orders, payments, and sales totals from this app. It does **not** create orders, take payments, or adjust inventory.
 
 Existing Daily Log routes stay as they are:
 
 - `GET /api/catalog` — unauthenticated UI catalog (do not require `BRIDGE_API_KEY`)
 - `POST /api/push-inventory` — human UI inventory writes (not part of this contract)
+- `GET /dashboard` — human sales totals (server-side Square calls; no tokens in the browser)
 
 Base URL (production): `https://rachael-production-log.vercel.app`
 
@@ -29,12 +30,18 @@ If `BRIDGE_API_KEY` is unset, these routes return **503** `{ "error": "Bridge is
 
 ## Accounts
 
-| Query | Env token | Env location | Meaning |
-|---|---|---|---|
-| `account=wholesale` (default) | `SQUARE_TOKEN` | `SQUARE_LOCATION_ID` | Rachael's Wholesale |
-| `account=restaurant` | `SQUARE_RESTAURANT_TOKEN` | `SQUARE_RESTAURANT_LOCATION_ID` | Maurice / cafe (optional) |
+Query `account=` selects the merchant. Default is **wholesale**.
 
-`locationId` may be passed on inventory, orders, and payments to override the account's default location.
+| Query | Env token (first hit) | Env location (first hit) | Meaning |
+|---|---|---|---|
+| `account=wholesale` (default) | `SQUARE_WHOLESALE_TOKEN`, then `SQUARE_TOKEN` | `SQUARE_WHOLESALE_LOCATION_ID`, then `SQUARE_LOCATION_ID` | Rachael's Seafood |
+| `account=lafayette` | `SQUARE_LAFAYETTE_TOKEN` | `SQUARE_LAFAYETTE_LOCATION_ID` | Lafayette cafe |
+| `account=maurice` | `SQUARE_MAURICE_TOKEN`, then `SQUARE_RESTAURANT_TOKEN` | `SQUARE_MAURICE_LOCATION_ID`, then `SQUARE_RESTAURANT_LOCATION_ID` | Maurice cafe |
+| `account=restaurant` | same as `maurice` | same as `maurice` | **Deprecated alias** for Maurice. Kept so existing agents do not break. Prefer `maurice`. |
+
+`locationId` may be passed on inventory, orders, payments, and sales to override the account's default location.
+
+Wholesale Daily Log inventory writes still use the wholesale token/location (new names with the same legacy fallback). They are **not** exposed under `/api/square/`.
 
 ## Response shape
 
@@ -52,10 +59,20 @@ Default page size is capped (`orders` 50, max 100; `payments` 100; `inventory` 1
 
 ### `GET /api/square/health`
 
-Token-present checks only (no Square call).
+Token **and** location present checks only (no Square call). Booleans only — never token values.
+
+`restaurant` mirrors `maurice` for older clients.
 
 ```json
-{ "ok": true, "accounts": { "wholesale": true, "restaurant": false } }
+{
+  "ok": true,
+  "accounts": {
+    "wholesale": true,
+    "lafayette": false,
+    "maurice": true,
+    "restaurant": true
+  }
+}
 ```
 
 ### `GET /api/square/catalog`
@@ -74,6 +91,18 @@ Square Orders Search for `created_at` in `[begin, end]`, newest first.
 
 Square List Payments for sales totals in the same time window.
 
+### `GET /api/square/sales`
+
+Today / week-to-date / month-to-date totals for **one** account. Day boundaries are **America/Chicago**. WTD starts **Monday 00:00** Chicago time.
+
+Totals are completed Square payments: `total_money` (includes tips) minus `refunded_money`. The payload also includes `gross`, `tips`, `refunds`, and `paymentCount`.
+
+If the account token/location pair is missing, this route returns **503** (or **400** if a token exists but no location). The `/dashboard` page shows those accounts as “not configured” instead of failing the whole page.
+
+## Sales dashboard
+
+`GET /dashboard` loads the same Chicago windows for wholesale, Lafayette, and Maurice in one table, plus a combined total. It calls Square from the server (`lib/square-sales.js`) — **never** from the browser. Missing accounts render as “not configured”.
+
 ## curl examples
 
 Replace `YOUR_BRIDGE_API_KEY` and timestamps. Do not put real keys in git.
@@ -83,11 +112,19 @@ Replace `YOUR_BRIDGE_API_KEY` and timestamps. Do not put real keys in git.
 curl -sS "https://rachael-production-log.vercel.app/api/square/health" \
   -H "Authorization: Bearer YOUR_BRIDGE_API_KEY"
 
-# Catalog (wholesale)
+# Catalog (wholesale — default, same as omitting account=)
 curl -sS "https://rachael-production-log.vercel.app/api/square/catalog?account=wholesale" \
   -H "Authorization: Bearer YOUR_BRIDGE_API_KEY"
 
-# Catalog (restaurant, if configured)
+# Catalog (Lafayette)
+curl -sS "https://rachael-production-log.vercel.app/api/square/catalog?account=lafayette" \
+  -H "Authorization: Bearer YOUR_BRIDGE_API_KEY"
+
+# Catalog (Maurice)
+curl -sS "https://rachael-production-log.vercel.app/api/square/catalog?account=maurice" \
+  -H "Authorization: Bearer YOUR_BRIDGE_API_KEY"
+
+# Deprecated alias — same merchant as maurice
 curl -sS "https://rachael-production-log.vercel.app/api/square/catalog?account=restaurant" \
   -H "Authorization: Bearer YOUR_BRIDGE_API_KEY"
 
@@ -104,7 +141,11 @@ curl -sS "https://rachael-production-log.vercel.app/api/square/orders?account=wh
   -H "Authorization: Bearer YOUR_BRIDGE_API_KEY"
 
 # Payments in a range
-curl -sS "https://rachael-production-log.vercel.app/api/square/payments?account=wholesale&begin=2026-09-01T00:00:00Z&end=2026-09-15T23:59:59Z" \
+curl -sS "https://rachael-production-log.vercel.app/api/square/payments?account=lafayette&begin=2026-09-01T00:00:00Z&end=2026-09-15T23:59:59Z" \
+  -H "Authorization: Bearer YOUR_BRIDGE_API_KEY"
+
+# Sales today / WTD / MTD (Chicago)
+curl -sS "https://rachael-production-log.vercel.app/api/square/sales?account=maurice" \
   -H "Authorization: Bearer YOUR_BRIDGE_API_KEY"
 ```
 
@@ -115,12 +156,20 @@ curl -sS "https://rachael-production-log.vercel.app/api/square/health" \
   -H "x-bridge-key: YOUR_BRIDGE_API_KEY"
 ```
 
-## Vercel env vars to add
+## Vercel env vars
 
 | Variable | Required | Notes |
 |---|---|---|
 | `BRIDGE_API_KEY` | Yes (for `/api/square/*`) | Shared secret. Routes 503 if unset. |
-| `SQUARE_RESTAURANT_TOKEN` | No | Second merchant access token |
-| `SQUARE_RESTAURANT_LOCATION_ID` | No | Default location for `account=restaurant` |
+| `SQUARE_WHOLESALE_TOKEN` | No if `SQUARE_TOKEN` is set | Preferred wholesale token |
+| `SQUARE_WHOLESALE_LOCATION_ID` | No if `SQUARE_LOCATION_ID` is set | Preferred wholesale location |
+| `SQUARE_TOKEN` | No if `SQUARE_WHOLESALE_TOKEN` is set | Legacy wholesale token (Daily Log + default bridge account) |
+| `SQUARE_LOCATION_ID` | No if `SQUARE_WHOLESALE_LOCATION_ID` is set | Legacy wholesale location |
+| `SQUARE_LAFAYETTE_TOKEN` | No | Lafayette cafe token |
+| `SQUARE_LAFAYETTE_LOCATION_ID` | No | Lafayette cafe location |
+| `SQUARE_MAURICE_TOKEN` | No | Maurice cafe token |
+| `SQUARE_MAURICE_LOCATION_ID` | No | Maurice cafe location |
+| `SQUARE_RESTAURANT_TOKEN` | No | Legacy Maurice token (`account=restaurant`) |
+| `SQUARE_RESTAURANT_LOCATION_ID` | No | Legacy Maurice location |
 
-`SQUARE_TOKEN` and `SQUARE_LOCATION_ID` are already used by Daily Log.
+`SQUARE_TOKEN` / `SQUARE_LOCATION_ID` already power Daily Log. New `SQUARE_WHOLESALE_*` names are optional aliases that take precedence when set.

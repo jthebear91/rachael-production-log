@@ -31,8 +31,8 @@ export default async function handler(req, res) {
   supabaseUrl = supabaseUrl.replace(/\/+$/, '').replace(/\/rest\/v1$/, '')
   const serviceKey = process.env.SUPABASE_SERVICE_KEY
   const todoistToken = process.env.TODOIST_TOKEN
-  const squareToken = process.env.SQUARE_TOKEN
-  const locationId = process.env.SQUARE_LOCATION_ID
+  const squareToken = process.env.SQUARE_WHOLESALE_TOKEN || process.env.SQUARE_TOKEN
+  const locationId = process.env.SQUARE_WHOLESALE_LOCATION_ID || process.env.SQUARE_LOCATION_ID
 
   try {
     const now = new Date().toISOString()
@@ -118,7 +118,7 @@ export default async function handler(req, res) {
     // is already safely logged in Supabase either way.
     let squareWarning = null
     if (!squareToken || !locationId) {
-      squareWarning = 'Square inventory was not updated — SQUARE_TOKEN or SQUARE_LOCATION_ID is missing.'
+      squareWarning = 'Square inventory was not updated — wholesale Square token or location is missing.'
     } else {
       try {
         const changes = splits.map(sp => ({

@@ -5,7 +5,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "verify": "node scripts/verify-bridge.cjs"
+    "verify": "node scripts/verify-bridge.cjs && node scripts/verify-sales-auth.cjs"
   },
   "dependencies": {
     "next": "14.2.3",

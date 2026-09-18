@@ -1,4 +1,5 @@
 import { formatUsdFromCents } from '../lib/chicago-time'
+import { isPinConfigured, isSalesAuthenticated } from '../lib/sales-auth'
 import { loadDashboardSales } from '../lib/square-sales'
 
 function MoneyValue({ period }) {
@@ -34,7 +35,16 @@ function asOfLabel(iso, timeZone) {
   })
 }
 
-export default function Dashboard({ payload }) {
+async function signOutOfSales() {
+  try {
+    await fetch('/api/sales-auth/logout', { method: 'POST' })
+  } catch {
+    // still leave the dashboard
+  }
+  window.location.assign('/sales-login')
+}
+
+export default function Dashboard({ payload, showSignOut }) {
   const { accounts = [], combined = {}, timezone, weekStartsOn, asOf } = payload || {}
 
   return (
@@ -48,6 +58,11 @@ export default function Dashboard({ payload }) {
           <span style={s.hdate}>
             {timezone} · {asOfLabel(asOf, timezone)}
           </span>
+          {showSignOut ? (
+            <button type="button" onClick={signOutOfSales} style={s.signOut}>
+              Sign out of Sales
+            </button>
+          ) : null}
           <a href="/" style={s.tabBtn}>Production Log</a>
         </div>
       </header>
@@ -127,10 +142,13 @@ export default function Dashboard({ payload }) {
   )
 }
 
-export async function getServerSideProps({ res }) {
+export async function getServerSideProps({ req, res }) {
   res.setHeader('Cache-Control', 'no-store')
+  if (!isSalesAuthenticated(req)) {
+    return { redirect: { destination: '/sales-login', permanent: false } }
+  }
   const payload = await loadDashboardSales()
-  return { props: { payload } }
+  return { props: { payload, showSignOut: isPinConfigured() } }
 }
 
 const s = {
@@ -148,6 +166,11 @@ const s = {
     background: '#fff', border: '1px solid #fff', borderRadius: 6,
     color: '#1c1c1c', fontSize: 13, fontWeight: 600, padding: '7px 16px',
     textDecoration: 'none', minHeight: 38, display: 'inline-flex', alignItems: 'center'
+  },
+  signOut: {
+    background: 'none', border: '1px solid #5a5a5a', borderRadius: 6,
+    color: '#ddd', fontSize: 13, fontWeight: 600, padding: '7px 16px',
+    minHeight: 38, display: 'inline-flex', alignItems: 'center'
   },
   main: { padding: '24px', maxWidth: 980, width: '100%', margin: '0 auto' },
   note: { fontSize: 13, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 22 },

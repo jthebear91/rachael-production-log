@@ -28,4 +28,6 @@ button { cursor: pointer; font-family: 'Inter', sans-serif; }
 input { font-family: 'Inter', sans-serif; }
 
 /* Prevent zoom on input focus on iOS */
-input[type="number"] { font-size: 16px; }
+input[type="number"],
+input[type="password"],
+input[type="text"] { font-size: 16px; }

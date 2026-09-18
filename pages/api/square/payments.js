@@ -1,4 +1,4 @@
-import { withBridgeGet } from '../../../lib/bridge-auth'
+import { withSalesSensitiveGet } from '../../../lib/bridge-auth'
 import {
   jsonData,
   money,
@@ -26,7 +26,7 @@ function normalizePayment(payment) {
   }
 }
 
-export default withBridgeGet(async (req, res) => {
+export default withSalesSensitiveGet(async (req, res) => {
   const account = resolveAccount(req.query.account)
   const locationId = resolveLocationId(req.query.locationId, account)
   const { begin, end } = resolveTimeRange(req.query)

@@ -6,7 +6,7 @@ Existing Daily Log routes stay as they are:
 
 - `GET /api/catalog` — unauthenticated UI catalog (do not require `BRIDGE_API_KEY`)
 - `POST /api/push-inventory` — human UI inventory writes (not part of this contract)
-- `GET /dashboard` — human sales totals (server-side Square calls; no tokens in the browser)
+- `GET /dashboard` — human sales totals (server-side Square calls; no tokens in the browser). Gated by `SALES_DASHBOARD_PIN` at `/sales-login`. Daily Log is not gated.
 
 Base URL (production): `https://rachael-production-log.vercel.app`
 
@@ -26,7 +26,9 @@ or:
 x-bridge-key: <BRIDGE_API_KEY>
 ```
 
-If `BRIDGE_API_KEY` is unset, these routes return **503** `{ "error": "Bridge is not configured" }` (fail closed). A missing or wrong key returns **401**.
+If `BRIDGE_API_KEY` is unset, catalog / inventory / health return **503** `{ "error": "Bridge is not configured" }` (fail closed). A missing or wrong key returns **401**.
+
+Sales-sensitive routes (`/sales`, `/payments`, `/orders`) also accept a valid sales PIN cookie (same session as `/dashboard`). Unauthenticated requests to those routes return **401**. Catalog, inventory, and health do not use the PIN — they stay bridge-key only so Daily Log tooling is not over-locked.
 
 ## Accounts
 
@@ -103,6 +105,8 @@ If the account token/location pair is missing, this route returns **503** (or **
 
 `GET /dashboard` loads the same Chicago windows for wholesale, Lafayette, and Maurice in one table, plus a combined total. It calls Square from the server (`lib/square-sales.js`) — **never** from the browser. Missing accounts render as “not configured”.
 
+The page is PIN-gated (`SALES_DASHBOARD_PIN`). Unauthenticated visits redirect to `/sales-login`. The Daily Log at `/` stays public.
+
 ## curl examples
 
 Replace `YOUR_BRIDGE_API_KEY` and timestamps. Do not put real keys in git.
@@ -160,7 +164,8 @@ curl -sS "https://rachael-production-log.vercel.app/api/square/health" \
 
 | Variable | Required | Notes |
 |---|---|---|
-| `BRIDGE_API_KEY` | Yes (for `/api/square/*`) | Shared secret. Routes 503 if unset. |
+| `BRIDGE_API_KEY` | Yes (for `/api/square/*`) | Shared secret. Catalog/inventory/health 503 if unset. |
+| `SALES_DASHBOARD_PIN` | Yes in production (for `/dashboard` and sales totals) | Shared PIN. Daily Log is not gated. Unset in production blocks sales with “PIN not configured”. |
 | `SQUARE_WHOLESALE_TOKEN` | No if `SQUARE_TOKEN` is set | Preferred wholesale token |
 | `SQUARE_WHOLESALE_LOCATION_ID` | No if `SQUARE_LOCATION_ID` is set | Preferred wholesale location |
 | `SQUARE_TOKEN` | No if `SQUARE_WHOLESALE_TOKEN` is set | Legacy wholesale token (Daily Log + default bridge account) |

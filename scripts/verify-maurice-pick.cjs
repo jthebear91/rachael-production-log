@@ -20,7 +20,9 @@ const {
   assertMauriceSquarePath,
   buildInventoryDecreaseBody,
   createMauricePick,
+  dryRunEnabled,
   getMauricePick,
+  liveInventoryDeductEnabled,
   loadPickPage,
   mauriceCustomerId,
   parseCreateBody,
@@ -101,6 +103,10 @@ function fakeSquare() {
   }
 }
 
+function liveEnv(env = {}) {
+  return { ...env, MAURICE_PICK_SEND_DRY_RUN: '0', MAURICE_PICK_LIVE_DEDUCT: '1' }
+}
+
 function sendDeps(store, square, env = {}) {
   return {
     store,
@@ -137,6 +143,14 @@ async function testValidation() {
   const notCounting = parseCreateBody(nightly([{ sellableCatalogObjectId: 'INV057', name: 'Sellable', qtyOrdered: 1 }]))
   assert(notCounting.ok, 'INV057 is outside the counting range')
   assert(WHOLESALE_PICK_LOCATION_ID === 'L6D106R4VNA72', 'wholesale location')
+  assert(dryRunEnabled({}) === true, 'dry-run defaults on')
+  assert(dryRunEnabled({ MAURICE_PICK_SEND_DRY_RUN: '1' }) === true, 'dry-run explicit')
+  assert(dryRunEnabled({ MAURICE_PICK_SEND_DRY_RUN: '0' }) === false, 'dry-run can be turned off')
+  assert(liveInventoryDeductEnabled({}) === false, 'live deduct defaults off')
+  assert(liveInventoryDeductEnabled({ MAURICE_PICK_LIVE_DEDUCT: '1' }) === false, 'live deduct alone stays dry')
+  assert(liveInventoryDeductEnabled({ MAURICE_PICK_SEND_DRY_RUN: '0' }) === false, 'dry-run off alone stays dry')
+  assert(liveInventoryDeductEnabled({ MAURICE_PICK_SEND_DRY_RUN: '0', MAURICE_PICK_LIVE_DEDUCT: '1' }) === true, 'both gates open live deduct')
+  assert(liveInventoryDeductEnabled({ MAURICE_PICK_SEND_DRY_RUN: '1', MAURICE_PICK_LIVE_DEDUCT: '1' }) === false, 'dry-run kill switch wins')
 
   assert(mauriceCustomerId({}) === DEFAULT_MAURICE_CUSTOMER_ID, 'default Maurice customer')
   assert(mauriceCustomerId({ SQUARE_MAURICE_CUSTOMER_ID: 'CUST_MAURICE' }) === 'CUST_MAURICE', 'customer override')
@@ -375,16 +389,10 @@ async function testCreateSend(createUnpaidInvoice) {
   const paths = square.calls.map(call => call.path)
   assert(!paths.some(item => item.toLowerCase().includes('payment')), `payment path in ${paths.join(',')}`)
   assert(!paths.includes('/orders'), `default send must not orders.create: ${paths.join(',')}`)
-  const inventoryAt = paths.indexOf(INVENTORY_PATH)
-  assert(inventoryAt !== -1, 'inventory adjustment ran')
-  assert(paths.indexOf('/catalog/object/VAR_A') !== -1 && paths.indexOf('/catalog/object/VAR_A') < inventoryAt, 'catalog read before deduct')
-  const inventory = square.calls[inventoryAt].body
-  assert(inventory.idempotency_key === `mp-${created.token}`, inventory.idempotency_key)
-  assert(inventory.changes.length === 2, 'zero qty omitted from inventory')
-  const qtyById = Object.fromEntries(inventory.changes.map(change => [change.adjustment.catalog_object_id, change.adjustment.quantity]))
-  assert(qtyById.VAR_A === '1' && qtyById.VAR_B === '2', JSON.stringify(qtyById))
-  assert(inventory.changes.every(change => change.adjustment.from_state === 'IN_STOCK' && change.adjustment.to_state === 'SOLD'), 'sold decrease')
-  assert(inventory.changes.every(change => change.adjustment.location_id === WHOLESALE_PICK_LOCATION_ID), inventory.changes[0].adjustment.location_id)
+  assert(!paths.includes(INVENTORY_PATH), `default send must not batchChange: ${paths.join(',')}`)
+  assert(paths.includes('/catalog/object/VAR_A'), 'catalog read still runs in dry-run')
+  assert(result.dryRun === true, 'default send is a dry run')
+  assert(result.inventoryAdjusted === false, 'default send does not adjust inventory')
 
   const before = square.calls.length
   const again = await sendMauricePick({
@@ -408,7 +416,7 @@ async function testCreateSend(createUnpaidInvoice) {
   assert(html.includes('<svg'), 'sheet includes qr')
   assert(html.includes('&lt;script&gt;'), 'sheet escapes name')
   assert(!html.includes('<script>alert'), 'sheet does not inject script')
-  assert(html.includes('Inventory is not changed until Send'), 'sheet says mint does not deduct')
+  assert(html.includes('Dry run is on. Send records the pull and logs the adjustment. It does not change wholesale inventory.'), 'sheet says dry-run does not deduct')
 
   const defaultStore = createMemoryPickStore()
   const defaults = await createMauricePick({
@@ -423,8 +431,8 @@ async function testCreateSend(createUnpaidInvoice) {
     token: defaults.token
   })
   assert(defaultSent.lines[0].qtySent === '3', 'omitted body sends the ordered quantity')
-  assert(defaultSquare.calls.find(call => call.path === INVENTORY_PATH).body.changes[0].adjustment.quantity === '3', 'inventory uses ordered qty')
-  assert(defaultSquare.calls.find(call => call.path === INVENTORY_PATH).body.changes[0].adjustment.location_id === 'L6D106R4VNA72', 'fixed location')
+  assert(defaultSent.dryRun === true, 'omitted body is still a dry run')
+  assert(!defaultSquare.calls.some(call => call.path === INVENTORY_PATH), 'omitted body does not deduct by default')
 
   const openStore = createMemoryPickStore()
   const open = await createMauricePick({
@@ -435,11 +443,99 @@ async function testCreateSend(createUnpaidInvoice) {
   const sheet = await loadPickSheet({ token: open.token, env, store: openStore })
   assert(sheet.includes('Stuffed shrimp') && sheet.includes('>4<'), 'open sheet lists ordered qty')
   assert(sheet.includes('<svg'), 'open sheet qr')
+  assert(sheet.includes('Dry run is on, so Send does not deduct inventory.'), 'open sheet names the dry run')
+}
+
+async function testLiveDeduct(createUnpaidInvoice) {
+  const store = createMemoryPickStore()
+  const env = liveEnv({ APP_BASE_URL: 'https://pick.example' })
+  const created = await createMauricePick({
+    env,
+    store,
+    body: nightly([
+      { sellableCatalogObjectId: 'VAR_A', name: 'Stuffed shrimp', qtyOrdered: 4 },
+      { sellableCatalogObjectId: 'VAR_B', name: 'Gumbo', qtyOrdered: 2 }
+    ])
+  })
+  const square = fakeSquare()
+  const logs = []
+  const originalLog = console.log
+  console.log = (...args) => {
+    logs.push(args.map(String).join(' '))
+    originalLog(...args)
+  }
+  let result
+  try {
+    result = await sendMauricePick({
+      ...sendDeps(store, square, env),
+      createUnpaidInvoice,
+      token: created.token,
+      body: { lines: [{ sellableCatalogObjectId: 'VAR_A', qty: 1 }] }
+    })
+  } finally {
+    console.log = originalLog
+  }
+  assert(result.dryRun === false && result.inventoryAdjusted === true, 'live send adjusts inventory')
+  assert(result.finalTotal === '30.00', `live final total ${result.finalTotal}`)
+  const inventory = square.calls.find(call => call.path === INVENTORY_PATH)
+  assert(inventory, 'live send calls batchChange')
+  assert(inventory.body.idempotency_key === `mp-${created.token}`, inventory.body.idempotency_key)
+  assert(inventory.body.changes.length === 2, 'zero qty omitted')
+  const qtyById = Object.fromEntries(inventory.body.changes.map(change => [change.adjustment.catalog_object_id, change.adjustment.quantity]))
+  assert(qtyById.VAR_A === '1' && qtyById.VAR_B === '2', JSON.stringify(qtyById))
+  assert(inventory.body.changes.every(change => change.adjustment.from_state === 'IN_STOCK' && change.adjustment.to_state === 'SOLD'), 'sold decrease')
+  assert(inventory.body.changes.every(change => change.adjustment.location_id === WHOLESALE_PICK_LOCATION_ID), 'fixed location')
+  const catalogAt = square.calls.findIndex(call => call.path === '/catalog/object/VAR_A')
+  const inventoryAt = square.calls.findIndex(call => call.path === INVENTORY_PATH)
+  assert(catalogAt !== -1 && catalogAt < inventoryAt, 'catalog read before deduct')
+  assert(logs.some(line => line.includes('maurice_pick_inventory_live') && line.includes('L6D106R4VNA72')), 'live adjustment is logged')
+  const liveSheet = await loadPickSheet({ token: created.token, env, store })
+  assert(liveSheet.includes('Inventory is not changed until Send.'), 'live sheet says deduct waits for Send')
+}
+
+async function testDryRunLog(createUnpaidInvoice) {
+  const store = createMemoryPickStore()
+  const env = { APP_BASE_URL: 'https://pick.example', MAURICE_PICK_LIVE_DEDUCT: '1' }
+  const created = await createMauricePick({
+    env,
+    store,
+    body: nightly([{ sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 4 }])
+  })
+  const square = fakeSquare()
+  const logs = []
+  const originalLog = console.log
+  console.log = (...args) => {
+    logs.push(args.map(String).join(' '))
+    originalLog(...args)
+  }
+  let result
+  try {
+    result = await sendMauricePick({
+      ...sendDeps(store, square, env),
+      createUnpaidInvoice,
+      token: created.token,
+      body: { lines: [{ sellableCatalogObjectId: 'VAR_A', qty: 1 }] }
+    })
+  } finally {
+    console.log = originalLog
+  }
+  assert(result.dryRun === true, 'live flag alone does not deduct')
+  assert(!square.calls.some(call => call.path === INVENTORY_PATH), 'no batchChange')
+  const logged = logs.find(line => line.includes('maurice_pick_inventory_dry_run'))
+  assert(logged, 'dry-run logs the intended adjustment')
+  const parsed = JSON.parse(logged)
+  assert(parsed.adjustment.changes[0].adjustment.catalog_object_id === 'VAR_A', 'logged variation')
+  assert(parsed.adjustment.changes[0].adjustment.quantity === '1', 'logged final qty')
+  assert(parsed.adjustment.changes[0].adjustment.location_id === 'L6D106R4VNA72', 'logged location')
+  assert(parsed.adjustment.changes[0].adjustment.from_state === 'IN_STOCK', 'logged from stock')
+  assert(parsed.adjustment.changes[0].adjustment.to_state === 'SOLD', 'logged to sold')
+  const page = await loadPickPage(created.token, { store, env })
+  assert(page.alreadySent === true && page.dryRun === true, 'phone keeps the stored dry-run')
 }
 
 async function testLockedRetry(createUnpaidInvoice) {
   const store = createMemoryPickStore()
-  const env = { APP_BASE_URL: 'https://pick.example' }
+  const env = liveEnv({ APP_BASE_URL: 'https://pick.example' })
   const created = await createMauricePick({
     env,
     store,
@@ -477,8 +573,28 @@ async function testLockedRetry(createUnpaidInvoice) {
 }
 
 async function testOptionalInvoice(createUnpaidInvoice) {
+  const dryStore = createMemoryPickStore()
+  const dryEnv = { APP_BASE_URL: 'https://pick.example' }
+  const dryCreated = await createMauricePick({
+    env: dryEnv,
+    store: dryStore,
+    body: nightly(
+      [{ sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 2 }],
+      { createInvoice: true }
+    )
+  })
+  const drySquare = fakeSquare()
+  const drySent = await sendMauricePick({
+    ...sendDeps(dryStore, drySquare, dryEnv),
+    createUnpaidInvoice,
+    token: dryCreated.token
+  })
+  assert(drySent.dryRun === true && drySent.invoiceId === 'INV1', 'dry-run can still invoice')
+  assert(!drySquare.calls.some(call => call.path === INVENTORY_PATH), 'invoice does not turn on deduct')
+  assert(drySquare.calls.some(call => call.path === '/orders'), 'invoice still needs a backing order')
+
   const store = createMemoryPickStore()
-  const env = { APP_BASE_URL: 'https://pick.example' }
+  const env = liveEnv({ APP_BASE_URL: 'https://pick.example' })
   const created = await createMauricePick({
     env,
     store,
@@ -570,6 +686,7 @@ function testSourceShape() {
   assert(create.includes('createMauricePick'), 'create handler')
   const page = fs.readFileSync(path.join(root, 'pages/pick/[token].js'), 'utf8')
   assert(page.includes('Already sent'), 'phone says already sent')
+  assert(page.includes('Dry run. Wholesale inventory was not changed.'), 'phone names a dry-run send')
   assert(page.includes('Send'), 'phone has Send')
   assert(page.includes('max={line.qtyOrdered}'), 'qty cannot be raised in the input')
   const pickSrc = fs.readFileSync(path.join(root, 'lib/maurice-pick.js'), 'utf8')
@@ -584,6 +701,8 @@ async function main() {
   await testValidation()
   await testSupabaseStore()
   await testCreateSend(createUnpaidInvoice)
+  await testLiveDeduct(createUnpaidInvoice)
+  await testDryRunLog(createUnpaidInvoice)
   await testLockedRetry(createUnpaidInvoice)
   await testOptionalInvoice(createUnpaidInvoice)
   await testCountingSku(createUnpaidInvoice)

@@ -15,6 +15,7 @@ const EMPTY = {
   note: '',
   alreadySent: false,
   locked: false,
+  dryRun: true,
   invoiceNumber: '',
   lines: []
 }
@@ -50,13 +51,13 @@ export default function PickPage(props) {
   )
 }
 
-function PickForm({ token, printDay, pickDate, estimatedTotal, finalTotal, shorts, alreadySent, locked, invoiceNumber, lines }) {
+function PickForm({ token, printDay, pickDate, estimatedTotal, finalTotal, shorts, alreadySent, locked, dryRun, invoiceNumber, lines }) {
   const [qtys, setQtys] = useState(() => {
     const initial = {}
     for (const line of lines) initial[line.sellableCatalogObjectId] = line.qty
     return initial
   })
-  const [done, setDone] = useState(alreadySent ? { invoiceNumber, lines, finalTotal, estimatedTotal, shorts } : null)
+  const [done, setDone] = useState(alreadySent ? { invoiceNumber, lines, finalTotal, estimatedTotal, shorts, dryRun } : null)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -100,7 +101,8 @@ function PickForm({ token, printDay, pickDate, estimatedTotal, finalTotal, short
         lines: Array.isArray(data.lines) && data.lines.length ? data.lines : lines,
         finalTotal: data.finalTotal || '',
         estimatedTotal: data.estimatedTotal || estimatedTotal || '',
-        shorts: Array.isArray(data.shorts) ? data.shorts : []
+        shorts: Array.isArray(data.shorts) ? data.shorts : [],
+        dryRun: data.dryRun === true
       })
     } catch {
       setError('Could not send')
@@ -116,6 +118,7 @@ function PickForm({ token, printDay, pickDate, estimatedTotal, finalTotal, short
         <h1 style={s.h1}>Already sent</h1>
         {done.finalTotal ? <p style={s.note}>Final total ${done.finalTotal}</p> : null}
         {done.estimatedTotal ? <p style={s.note}>Estimated was ${done.estimatedTotal}</p> : null}
+        {done.dryRun ? <p style={s.note}>Dry run. Wholesale inventory was not changed.</p> : null}
         {done.invoiceNumber ? <p style={s.note}>Invoice {done.invoiceNumber}</p> : null}
         {Array.isArray(done.shorts) && done.shorts.length ? (
           <ul style={s.list}>
@@ -149,6 +152,7 @@ function PickForm({ token, printDay, pickDate, estimatedTotal, finalTotal, short
           : 'Leave each number alone unless the pull was short. You can only lower it.'}
       </p>
       {estimatedTotal ? <p style={s.note}>Estimated total ${estimatedTotal}</p> : null}
+      {dryRun ? <p style={s.note}>Dry run is on. Send records this pull and does not change wholesale inventory.</p> : null}
       <ul style={s.list}>
         {lines.map(line => (
           <li key={line.sellableCatalogObjectId} style={s.row}>

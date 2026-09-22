@@ -11,9 +11,11 @@ const {
 } = require('../lib/pick-store')
 const {
   ALREADY_SENT_LABEL,
+  COUNTING_ITEM_ERROR,
   DEFAULT_APP_BASE_URL,
   DEFAULT_MAURICE_CUSTOMER_ID,
   INVENTORY_PATH,
+  WHOLESALE_PICK_LOCATION_ID,
   appBaseUrl,
   assertMauriceSquarePath,
   buildInventoryDecreaseBody,
@@ -63,7 +65,17 @@ function fakeSquare() {
     }
     if (requestPath.startsWith('/catalog/object/')) {
       const id = decodeURIComponent(requestPath.split('/').pop())
-      return { object: { type: 'ITEM_VARIATION', id, is_deleted: false } }
+      return {
+        object: {
+          type: 'ITEM_VARIATION',
+          id,
+          is_deleted: false,
+          item_variation_data: {
+            sku: `SELL-${id}`,
+            price_money: { amount: 1000, currency: 'USD' }
+          }
+        }
+      }
     }
     if (requestPath === '/orders') return { order: { id: 'ORDER1', tenders: [] } }
     if (requestPath === '/invoices') return { invoice: { id: 'INV1', version: 3, status: 'DRAFT' } }
@@ -100,18 +112,31 @@ function sendDeps(store, square, env = {}) {
   }
 }
 
+function nightly(lines, extra = {}) {
+  return {
+    PRINT_DAY: 'Tue',
+    date: '2026-09-22',
+    estimatedTotal: '48.00',
+    lines,
+    ...extra
+  }
+}
+
 async function testValidation() {
-  const bad = parseCreateBody({
-    lines: [{ catalogObjectId: 'VAR1', orderedQty: 1, amount: 100 }]
-  })
+  const bad = parseCreateBody(nightly([{ sellableCatalogObjectId: 'VAR1', name: 'Shrimp', qtyOrdered: 1, amount: 100 }]))
   assert(!bad.ok && bad.error === 'Payment fields are not accepted', bad.error)
-  const dup = parseCreateBody({
-    lines: [
-      { catalogObjectId: 'VAR1', orderedQty: 1 },
-      { catalogObjectId: 'VAR1', orderedQty: 2 }
-    ]
-  })
-  assert(!dup.ok && dup.error === 'Duplicate catalogObjectId', dup.error)
+  const dup = parseCreateBody(nightly([
+    { sellableCatalogObjectId: 'VAR1', name: 'Shrimp', qtyOrdered: 1 },
+    { sellableCatalogObjectId: 'VAR1', name: 'Shrimp again', qtyOrdered: 2 }
+  ]))
+  assert(!dup.ok && dup.error === 'Duplicate sellableCatalogObjectId', dup.error)
+  const counting = parseCreateBody(nightly([{ sellableCatalogObjectId: 'INV001', name: 'On hand', qtyOrdered: 1 }]))
+  assert(!counting.ok && counting.error === COUNTING_ITEM_ERROR, counting.error)
+  const countingLast = parseCreateBody(nightly([{ sellableCatalogObjectId: 'INV056', name: 'Last count', qtyOrdered: 1 }]))
+  assert(!countingLast.ok, 'INV056 rejected')
+  const notCounting = parseCreateBody(nightly([{ sellableCatalogObjectId: 'INV057', name: 'Sellable', qtyOrdered: 1 }]))
+  assert(notCounting.ok, 'INV057 is outside the counting range')
+  assert(WHOLESALE_PICK_LOCATION_ID === 'L6D106R4VNA72', 'wholesale location')
 
   assert(mauriceCustomerId({}) === DEFAULT_MAURICE_CUSTOMER_ID, 'default Maurice customer')
   assert(mauriceCustomerId({ SQUARE_MAURICE_CUSTOMER_ID: 'CUST_MAURICE' }) === 'CUST_MAURICE', 'customer override')
@@ -142,7 +167,7 @@ async function testValidation() {
     idempotencyKey: 'mp-token',
     locationId: 'LOC_W',
     occurredAt: '2026-09-22T15:00:00.000Z',
-    lines: [{ catalogObjectId: 'VAR1', qty: '2' }]
+    lines: [{ sellableCatalogObjectId: 'VAR1', qtySent: '2' }]
   })
   assert(body.changes[0].adjustment.from_state === 'IN_STOCK', 'from stock')
   assert(body.changes[0].adjustment.to_state === 'SOLD', 'to sold')
@@ -249,23 +274,30 @@ async function testSupabaseStore() {
 async function testCreateSend(createUnpaidInvoice) {
   const store = createMemoryPickStore()
   const env = { APP_BASE_URL: 'https://pick.example', SQUARE_MAURICE_CUSTOMER_ID: '' }
-  const created = await createMauricePick({
-    env,
-    store,
-    body: {
-      note: 'Tuesday pull',
-      lines: [
-        { catalogObjectId: 'VAR_A', name: 'Stuffed shrimp', orderedQty: 4 },
-        { catalogObjectId: 'VAR_B', name: 'Gumbo', orderedQty: '2' },
-        { catalogObjectId: 'VAR_C', name: '<script>alert(1)</script>', orderedQty: 5 }
-      ]
-    }
-  })
+  const originalFetch = global.fetch
+  global.fetch = async () => { throw new Error('mint must not call the network') }
+  let created
+  try {
+    created = await createMauricePick({
+      env,
+      store,
+      body: nightly([
+        { sellableCatalogObjectId: 'VAR_A', name: 'Stuffed shrimp', qtyOrdered: 4 },
+        { sellableCatalogObjectId: 'VAR_B', name: 'Gumbo', qtyOrdered: '2' },
+        { sellableCatalogObjectId: 'VAR_C', name: '<script>alert(1)</script>', qtyOrdered: 5 }
+      ])
+    })
+  } finally {
+    global.fetch = originalFetch
+  }
   assert(created.pickUrl === `https://pick.example/pick/${created.token}`, created.pickUrl)
   assert(created.sheetUrl === `https://pick.example/api/pick/${created.token}/sheet`, created.sheetUrl)
+  assert(created.qrUrl === `https://pick.example/api/pick/${created.token}/qr`, created.qrUrl)
+  assert((await getMauricePick(created.token, { store })).status === 'open', 'mint leaves the pick open')
+  assert((await getMauricePick(created.token, { store })).createInvoice === false, 'invoice defaults off')
 
   const square = fakeSquare()
-  const originalFetch = global.fetch
+  const sendFetch = global.fetch
   global.fetch = async () => { throw new Error('global fetch') }
   let result
   try {
@@ -274,7 +306,7 @@ async function testCreateSend(createUnpaidInvoice) {
         ...sendDeps(store, square, env),
         createUnpaidInvoice,
         token: created.token,
-        body: { lines: [{ catalogObjectId: 'VAR_A', qty: 99 }] }
+        body: { lines: [{ sellableCatalogObjectId: 'VAR_A', qty: 99 }] }
       }),
       400,
       'Quantity cannot be higher than ordered'
@@ -287,7 +319,7 @@ async function testCreateSend(createUnpaidInvoice) {
         ...sendDeps(store, square, env),
         createUnpaidInvoice,
         token: created.token,
-        body: { source_id: 'cnon:card', lines: [{ catalogObjectId: 'VAR_A', qty: 1 }] }
+        body: { source_id: 'cnon:card', lines: [{ sellableCatalogObjectId: 'VAR_A', qty: 1 }] }
       }),
       400,
       'Payment fields are not accepted'
@@ -298,7 +330,7 @@ async function testCreateSend(createUnpaidInvoice) {
     const pending = await createMauricePick({
       env,
       store: unconfigured,
-      body: { lines: [{ catalogObjectId: 'VAR_A', orderedQty: 1 }] }
+      body: nightly([{ sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 1 }])
     })
     await assertRejects(
       () => sendMauricePick({
@@ -322,8 +354,8 @@ async function testCreateSend(createUnpaidInvoice) {
       token: created.token,
       body: {
         lines: [
-          { catalogObjectId: 'VAR_A', qty: 1 },
-          { catalogObjectId: 'VAR_C', qty: 0 }
+          { sellableCatalogObjectId: 'VAR_A', qty: 1 },
+          { sellableCatalogObjectId: 'VAR_C', qty: 0 }
         ]
       }
     })
@@ -333,48 +365,40 @@ async function testCreateSend(createUnpaidInvoice) {
 
   assert(result.alreadySent === false, 'first send')
   assert(result.status === 'sent', 'sent status')
-  assert(result.invoiceId === 'INV1', 'invoice id')
-  assert(result.invoiceNumber === '1042', 'invoice number')
-  assert(result.lines.find(line => line.catalogObjectId === 'VAR_B').qty === '2', 'omitted line stays ordered')
-  assert(result.lines.find(line => line.catalogObjectId === 'VAR_C').qty === '0', 'zero short is stored')
+  assert(result.invoiceId == null, 'default send does not invoice')
+  assert(result.lines.find(line => line.sellableCatalogObjectId === 'VAR_B').qtySent === '2', 'omitted line stays ordered')
+  assert(result.lines.find(line => line.sellableCatalogObjectId === 'VAR_C').qtySent === '0', 'zero short is stored')
+  assert(result.finalTotal === '30.00', `final total ${result.finalTotal}`)
+  assert(result.shorts.length === 2, 'two shorts')
+  assert(result.shorts.find(line => line.sellableCatalogObjectId === 'VAR_A').delta === '3', 'shrimp short delta')
 
   const paths = square.calls.map(call => call.path)
   assert(!paths.some(item => item.toLowerCase().includes('payment')), `payment path in ${paths.join(',')}`)
+  assert(!paths.includes('/orders'), `default send must not orders.create: ${paths.join(',')}`)
   const inventoryAt = paths.indexOf(INVENTORY_PATH)
-  const orderAt = paths.indexOf('/orders')
-  assert(inventoryAt !== -1 && inventoryAt < orderAt, `inventory before invoice: ${paths.join(',')}`)
+  assert(inventoryAt !== -1, 'inventory adjustment ran')
+  assert(paths.indexOf('/catalog/object/VAR_A') !== -1 && paths.indexOf('/catalog/object/VAR_A') < inventoryAt, 'catalog read before deduct')
   const inventory = square.calls[inventoryAt].body
   assert(inventory.idempotency_key === `mp-${created.token}`, inventory.idempotency_key)
   assert(inventory.changes.length === 2, 'zero qty omitted from inventory')
   const qtyById = Object.fromEntries(inventory.changes.map(change => [change.adjustment.catalog_object_id, change.adjustment.quantity]))
   assert(qtyById.VAR_A === '1' && qtyById.VAR_B === '2', JSON.stringify(qtyById))
   assert(inventory.changes.every(change => change.adjustment.from_state === 'IN_STOCK' && change.adjustment.to_state === 'SOLD'), 'sold decrease')
-  assert(inventory.changes.every(change => change.adjustment.location_id === 'LOC_W'), 'wholesale location')
-
-  const order = square.calls.find(call => call.path === '/orders').body
-  assert(order.idempotency_key === `mp-${created.token}`, 'order idempotency')
-  assert(order.order.customer_id === DEFAULT_MAURICE_CUSTOMER_ID, 'default Maurice customer when env blank')
-  assert(order.order.line_items.length === 2, 'zero qty omitted from order')
-  assert(!Object.prototype.hasOwnProperty.call(order.order, 'tenders'), 'no tenders')
-  const invoice = square.calls.find(call => call.path === '/invoices').body
-  assert(invoice.invoice.delivery_method === 'SHARE_MANUALLY', 'manual share')
-  assert(invoice.invoice.payment_requests[0].automatic_payment_source === 'NONE', 'no auto charge')
-  assert(invoice.invoice.primary_recipient.customer_id === DEFAULT_MAURICE_CUSTOMER_ID, 'invoice customer')
-  assert(invoice.invoice.description === 'Tuesday pull', 'note becomes description')
+  assert(inventory.changes.every(change => change.adjustment.location_id === WHOLESALE_PICK_LOCATION_ID), inventory.changes[0].adjustment.location_id)
 
   const before = square.calls.length
   const again = await sendMauricePick({
     ...sendDeps(store, square, env),
     createUnpaidInvoice,
     token: created.token,
-    body: { lines: [{ catalogObjectId: 'VAR_A', qty: 4 }] }
+    body: { lines: [{ sellableCatalogObjectId: 'VAR_A', qty: 4 }] }
   })
   assert(again.alreadySent === true, 'second send')
-  assert(again.invoiceId === 'INV1', 'same invoice')
+  assert(again.finalTotal === '30.00', 'replay keeps the final total')
   assert(square.calls.length === before, 'second send does not call Square')
 
   const page = await loadPickPage(created.token, { store })
-  assert(page.alreadySent === true && page.invoiceNumber === '1042', 'phone props already sent')
+  assert(page.alreadySent === true && page.finalTotal === '30.00', 'phone props already sent')
   const html = await renderPickSheet({
     pick: await getMauricePick(created.token, { store }),
     pickUrl: created.pickUrl
@@ -384,12 +408,13 @@ async function testCreateSend(createUnpaidInvoice) {
   assert(html.includes('<svg'), 'sheet includes qr')
   assert(html.includes('&lt;script&gt;'), 'sheet escapes name')
   assert(!html.includes('<script>alert'), 'sheet does not inject script')
+  assert(html.includes('Inventory is not changed until Send'), 'sheet says mint does not deduct')
 
   const defaultStore = createMemoryPickStore()
   const defaults = await createMauricePick({
     env,
     store: defaultStore,
-    body: { lines: [{ catalogObjectId: 'VAR_A', name: 'Shrimp', orderedQty: 3 }] }
+    body: nightly([{ sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 3 }])
   })
   const defaultSquare = fakeSquare()
   const defaultSent = await sendMauricePick({
@@ -397,14 +422,15 @@ async function testCreateSend(createUnpaidInvoice) {
     createUnpaidInvoice,
     token: defaults.token
   })
-  assert(defaultSent.lines[0].qty === '3', 'omitted body sends the ordered quantity')
+  assert(defaultSent.lines[0].qtySent === '3', 'omitted body sends the ordered quantity')
   assert(defaultSquare.calls.find(call => call.path === INVENTORY_PATH).body.changes[0].adjustment.quantity === '3', 'inventory uses ordered qty')
+  assert(defaultSquare.calls.find(call => call.path === INVENTORY_PATH).body.changes[0].adjustment.location_id === 'L6D106R4VNA72', 'fixed location')
 
   const openStore = createMemoryPickStore()
   const open = await createMauricePick({
     env,
     store: openStore,
-    body: { lines: [{ catalogObjectId: 'VAR_A', name: 'Stuffed shrimp', orderedQty: 4 }] }
+    body: nightly([{ sellableCatalogObjectId: 'VAR_A', name: 'Stuffed shrimp', qtyOrdered: 4 }])
   })
   const sheet = await loadPickSheet({ token: open.token, env, store: openStore })
   assert(sheet.includes('Stuffed shrimp') && sheet.includes('>4<'), 'open sheet lists ordered qty')
@@ -417,7 +443,7 @@ async function testLockedRetry(createUnpaidInvoice) {
   const created = await createMauricePick({
     env,
     store,
-    body: { lines: [{ catalogObjectId: 'VAR_A', name: 'Shrimp', orderedQty: 4 }] }
+    body: nightly([{ sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 4 }])
   })
   const square = fakeSquare()
   square.failInventoryOnce()
@@ -426,7 +452,7 @@ async function testLockedRetry(createUnpaidInvoice) {
       ...sendDeps(store, square, env),
       createUnpaidInvoice,
       token: created.token,
-      body: { lines: [{ catalogObjectId: 'VAR_A', qty: 1 }] }
+      body: { lines: [{ sellableCatalogObjectId: 'VAR_A', qty: 1 }] }
     }),
     502,
     'temporary'
@@ -436,17 +462,84 @@ async function testLockedRetry(createUnpaidInvoice) {
     ...sendDeps(store, square, env),
     createUnpaidInvoice,
     token: created.token,
-    body: { lines: [{ catalogObjectId: 'VAR_A', qty: 4 }] }
+    body: { lines: [{ sellableCatalogObjectId: 'VAR_A', qty: 4 }] }
   })
   assert(finished.alreadySent === false, 'retry completes')
-  assert(finished.lines[0].qty === '1', 'retry keeps the short')
+  assert(finished.lines[0].qtySent === '1', 'retry keeps the short')
   const adjustments = square.calls.filter(call => call.path === INVENTORY_PATH)
   assert(adjustments.length === 2, 'inventory retried')
   assert(adjustments[0].body.idempotency_key === adjustments[1].body.idempotency_key, 'same inventory key')
   assert(adjustments[0].body.changes[0].adjustment.quantity === '1', 'first qty locked')
   assert(adjustments[1].body.changes[0].adjustment.quantity === '1', 'retry qty locked')
   assert(adjustments[0].body.changes[0].adjustment.occurred_at === adjustments[1].body.changes[0].adjustment.occurred_at, 'same occurred_at')
-  assert(square.calls.filter(call => call.path === '/orders').length === 1, 'one order')
+  assert(square.calls.filter(call => call.path === '/orders').length === 0, 'retry does not create an order')
+  assert(adjustments.every(call => call.body.changes[0].adjustment.location_id === 'L6D106R4VNA72'), 'retry stays on wholesale location')
+}
+
+async function testOptionalInvoice(createUnpaidInvoice) {
+  const store = createMemoryPickStore()
+  const env = { APP_BASE_URL: 'https://pick.example' }
+  const created = await createMauricePick({
+    env,
+    store,
+    body: nightly(
+      [{ sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 2 }],
+      { createInvoice: true }
+    )
+  })
+  const square = fakeSquare()
+  const sent = await sendMauricePick({
+    ...sendDeps(store, square, env),
+    createUnpaidInvoice,
+    token: created.token
+  })
+  assert(sent.invoiceId === 'INV1', 'opt-in invoice')
+  const paths = square.calls.map(call => call.path)
+  const inventoryAt = paths.indexOf(INVENTORY_PATH)
+  const orderAt = paths.indexOf('/orders')
+  assert(inventoryAt !== -1 && orderAt !== -1 && inventoryAt < orderAt, 'deduct before invoice order')
+  const invoice = square.calls.find(call => call.path === '/invoices').body
+  assert(invoice.invoice.delivery_method === 'SHARE_MANUALLY', 'manual share')
+  assert(invoice.invoice.payment_requests[0].automatic_payment_source === 'NONE', 'no auto charge')
+  assert(invoice.invoice.primary_recipient.customer_id === DEFAULT_MAURICE_CUSTOMER_ID, 'Maurice customer')
+  assert(!paths.some(item => item.toLowerCase().includes('payment')), 'no payment path')
+}
+
+async function testCountingSku(createUnpaidInvoice) {
+  const store = createMemoryPickStore()
+  const env = { APP_BASE_URL: 'https://pick.example' }
+  const created = await createMauricePick({
+    env,
+    store,
+    body: nightly([{ sellableCatalogObjectId: 'VAR_COUNT', name: 'Looks sellable', qtyOrdered: 1 }])
+  })
+  const calls = []
+  const squareFetch = async args => {
+    calls.push(args.path)
+    if (String(args.path).startsWith('/catalog/object/')) {
+      return {
+        object: {
+          type: 'ITEM_VARIATION',
+          id: 'VAR_COUNT',
+          is_deleted: false,
+          item_variation_data: { sku: 'INV012', price_money: { amount: 100, currency: 'USD' } }
+        }
+      }
+    }
+    throw new Error(`should not call ${args.path}`)
+  }
+  await assertRejects(
+    () => sendMauricePick({
+      ...sendDeps(store, { calls: [], squareFetch }, env),
+      squareFetch,
+      createUnpaidInvoice,
+      token: created.token
+    }),
+    400,
+    COUNTING_ITEM_ERROR
+  )
+  assert(!calls.includes(INVENTORY_PATH), 'counting sku is not deducted')
+  assert((await getMauricePick(created.token, { store })).status === 'open', 'counting rejection leaves the pick open')
 }
 
 function testSourceShape() {
@@ -458,6 +551,7 @@ function testSourceShape() {
     'pages/api/pick/maurice-restock/create.js',
     'pages/api/pick/[token]/send.js',
     'pages/api/pick/[token]/sheet.js',
+    'pages/api/pick/[token]/qr.js',
     'pages/pick/[token].js'
   ]
   const banned = ['CreatePayment', 'CompletePayment', '/v2/payments', "'/payments'", '"/payments"', 'PayOrder']
@@ -477,7 +571,10 @@ function testSourceShape() {
   const page = fs.readFileSync(path.join(root, 'pages/pick/[token].js'), 'utf8')
   assert(page.includes('Already sent'), 'phone says already sent')
   assert(page.includes('Send'), 'phone has Send')
-  assert(page.includes('max={line.orderedQty}'), 'qty cannot be raised in the input')
+  assert(page.includes('max={line.qtyOrdered}'), 'qty cannot be raised in the input')
+  const pickSrc = fs.readFileSync(path.join(root, 'lib/maurice-pick.js'), 'utf8')
+  assert(!pickSrc.includes('api.twilio.com') && !pickSrc.includes('TWILIO_'), 'pick notify does not call Twilio')
+  assert(pickSrc.includes('WHOLESALE_PICK_LOCATION_ID'), 'location is fixed in code')
   const sql = fs.readFileSync(path.join(root, 'supabase/pick_tokens.sql'), 'utf8')
   assert(sql.includes('pick_tokens') && sql.includes('enable row level security'), 'sql creates locked table')
 }
@@ -488,6 +585,8 @@ async function main() {
   await testSupabaseStore()
   await testCreateSend(createUnpaidInvoice)
   await testLockedRetry(createUnpaidInvoice)
+  await testOptionalInvoice(createUnpaidInvoice)
+  await testCountingSku(createUnpaidInvoice)
   testSourceShape()
   console.log('verify-maurice-pick: ok')
 }

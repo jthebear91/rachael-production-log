@@ -7,6 +7,10 @@ create table if not exists public.pick_tokens (
   token text primary key,
   status text not null default 'open' check (status in ('open', 'sending', 'sent')),
   lines jsonb not null,
+  print_day text,
+  pick_date text,
+  estimated_total text,
+  create_invoice boolean not null default false,
   note text,
   sent_lines jsonb,
   occurred_at timestamptz,
@@ -14,9 +18,16 @@ create table if not exists public.pick_tokens (
   invoice_number text,
   order_id text,
   public_url text,
+  notify jsonb,
   created_at timestamptz not null default now(),
   sent_at timestamptz
 );
+
+alter table public.pick_tokens add column if not exists print_day text;
+alter table public.pick_tokens add column if not exists pick_date text;
+alter table public.pick_tokens add column if not exists estimated_total text;
+alter table public.pick_tokens add column if not exists create_invoice boolean not null default false;
+alter table public.pick_tokens add column if not exists notify jsonb;
 
 alter table public.pick_tokens enable row level security;
 

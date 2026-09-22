@@ -1,59 +1,74 @@
-# Maurice → Wholesale pick-list QR
-
-v1. Claude (or any bridge caller) mints a pick list. Wholesale prints the sheet, pulls stock, and scans the QR. The phone confirms what actually left. Send does two things, in order:
-
-1. Decrease wholesale Square inventory by the quantities that left.
-2. Book an **unpaid** invoice on the wholesale Square account to the Maurice customer, for the weekly check total.
+# Maurice nightly pick QR
 
 Production host: `https://rachael-production-log.vercel.app`
 
-This does not rebuild the 2am planner, send Twilio or customer SMS, or call Square Payments.
+Claude already builds the Maurice pick around 2am CT, Monday–Saturday. This app does **not** replace that job. It defers the inventory deduction until after the physical pull.
 
-Square-Version stays **`2024-02-22`**, the same header as `lib/square-client.js` and `pages/api/push-inventory.js`.
+## Go-live: Claude prompt change required — YES
+
+Today the Claude prompt does this, in order:
+
+1. Read docs and on-hand counts for **INV001–INV056** at wholesale location `L6D106R4VNA72`.
+2. Run `nightly_pick_list.py` and make the PDF.
+3. Price the lines into `order_totals_log.md`.
+4. **Step 7:** `inventory.batchChange` adjustment `IN_STOCK` → `SOLD` for the sellable pick quantities. **This is the deduction this QR defers.**
+5. Notify and save the PDF under Mac `Documents/Wholesale Ordering/`.
+
+This app **does not deduct when it mints a token.** Mint only stores `PRINT_DAY`, the date, the sellable lines, and `estimatedTotal`, then returns URLs. The only `batchChange` is `POST /api/pick/[token]/send`, after someone confirms the pull.
+
+**If Claude still runs step 7 and someone also taps Send, wholesale stock is deducted twice.**
+
+Before go-live, edit the Claude prompt:
+
+- Step 7 becomes a no-op. Do not call `inventory.batchChange` in the 2am job.
+- After the PDF lines and `estimatedTotal` exist, `POST /api/pick/maurice-restock/create` with the nightly payload below.
+- Embed `qrUrl` (SVG) on the PDF. `sheetUrl` is the printable page if you want the whole sheet instead of only the image.
+- Leave INV001–INV056 counting alone. This QR job never adjusts those codes.
+
+Until that prompt change ships, do not point a live PDF at Send.
+
+Hard never for this job: `payments.create`, Lafayette merge, adjusting INV001–INV056, and Twilio. `orders.create` stays out of the 2am prompt. The app calls it only when an unpaid invoice is explicitly turned on, and only as the invoice's backing order (see below).
+
+## What Send does
+
+1. Catalog-read each sellable variation (SKU and price). If the id, name, or SKU is INV001–INV056, Send stops and does not adjust inventory.
+2. `POST /v2/inventory/changes/batch-create` on the **wholesale** token. Location is always `L6D106R4VNA72`. Each positive quantity is `from_state: IN_STOCK` → `to_state: SOLD`. Lines shorted to 0 are omitted. Idempotency key `mp-<token>` and `occurred_at` are fixed on the first Send.
+3. Optional unpaid invoice, only when `createInvoice` is true on the payload or `MAURICE_PICK_CREATE_INVOICE=1`. That path is the existing `createUnpaidInvoice` helper: `SHARE_MANUALLY`, `automatic_payment_source: NONE`, customer `TQ8JFGXMZGTY8JNKCY1TV72618` unless `SQUARE_MAURICE_CUSTOMER_ID` is set. Square requires a backing order for an invoice, so this is the only `orders.create`. It does not take a payment. Default is **off**, so a normal Send does not call Orders or Invoices.
+4. Notify with the final total and short deltas. The Send JSON always includes them. A structured log line `maurice_pick_notify` is written. If `JORDAN_NOTIFY_WEBHOOK` is an http(s) URL, Send also POSTs that JSON. Twilio hosts are refused. A second Send is **Already sent** and does not deduct or notify again.
+
+Square-Version stays **`2024-02-22`**.
 
 ## Storage
 
-Pick tokens live in Supabase table `public.pick_tokens`.
+Supabase table `public.pick_tokens`, using `SUPABASE_SERVICE_KEY` (the same server key as Batch Tracker). No Vercel KV or Blob client in this repo. The anon key is not used.
 
-This repo does not use Vercel KV or Blob. Batch Tracker already talks to Supabase REST with `SUPABASE_SERVICE_KEY` (`pages/api/get-batches.js`, `pages/api/package-batches.js`). The pick store uses that same key. It does **not** use `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+Apply [`supabase/pick_tokens.sql`](../supabase/pick_tokens.sql) once. If an older `pick_tokens` table was already created, run that file again; the new columns are `add column if not exists`.
 
-Apply [`supabase/pick_tokens.sql`](../supabase/pick_tokens.sql) once in the Supabase SQL editor. The table has RLS enabled and no policies, so the anon key cannot read tokens. The service role bypasses RLS.
-
-If the URL or service key is missing, create/send/sheet return **503** `Pick store is not configured`. If the table was never created, the store returns **503** telling you to apply the SQL file.
-
-`PICK_STORE=memory` keeps tokens in the Node process only. It works for local `next dev` and the verify script. It is ignored when `NODE_ENV=production` or `VERCEL=1`, so a production deploy cannot silently drop tokens on the next cold start.
-
-## Unpaid-only guarantee
-
-Pick routes never call Square Payments (`CreatePayment`, `CompletePayment`, PayOrder, or `/v2/payments`).
-
-`POST /api/pick/[token]/send` calls:
-
-1. `POST /v2/inventory/changes/batch-create` on the **wholesale** token. Each positive quantity is an adjustment `from_state: IN_STOCK` → `to_state: SOLD`. That is the decrease (the Daily Log increase is `NONE` → `IN_STOCK`). Lines shorted to 0 are omitted. Idempotency key is `mp-<token>`, and `occurred_at` is fixed on the first Send so a retry is the same Square body.
-2. The existing `createUnpaidInvoice` helper (`lib/square-invoices.js`), same path as `POST /api/square/invoices/create`:
-   - `GET /v2/catalog/object/{id}` — must be an `ITEM_VARIATION`
-   - `POST /v2/orders` — open order, catalog variation id + quantity, no amounts, no tenders
-   - `POST /v2/invoices` — `delivery_method: SHARE_MANUALLY` (Square does not email or text Maurice), `automatic_payment_source: NONE`
-   - `POST /v2/invoices/{id}/publish` — leaves the invoice **UNPAID**
-
-The same `mp-<token>` idempotency key is passed into the invoice helper (it appends `:invoice` and `:publish`). A second Send after success does not call Square again. The phone and the sheet say **Already sent**.
-
-Bodies with payment-shaped fields are rejected with **400** before any Square call.
+Missing Supabase config → **503**. `PICK_STORE=memory` is a single-process local fallback and is ignored when `NODE_ENV=production` or `VERCEL=1`.
 
 ## `POST /api/pick/maurice-restock/create`
 
-Auth: `BRIDGE_API_KEY`, same as the invoice bridge (`Authorization: Bearer …` or `x-bridge-key`). Missing key → **503**. Wrong key → **401**.
+Auth: `BRIDGE_API_KEY` (`Authorization: Bearer …` or `x-bridge-key`). Missing key → **503**. Wrong key → **401**.
+
+This is the call Claude makes after step 6, instead of step 7. It does not call Square.
 
 ```json
 {
+  "PRINT_DAY": "Tue",
+  "date": "2026-09-22",
+  "estimatedTotal": "48.00",
+  "createInvoice": false,
   "lines": [
-    { "catalogObjectId": "VARIATION_ID", "name": "Stuffed shrimp", "orderedQty": 4 }
-  ],
-  "note": "optional"
+    {
+      "sellableCatalogObjectId": "VARIATION_ID",
+      "name": "Stuffed shrimp",
+      "qtyOrdered": 4
+    }
+  ]
 }
 ```
 
-`catalogObjectId` is a Square **item variation** id on the wholesale catalog. `name` is for the sheet and the phone only. `orderedQty` is a positive number up to 10000. Do not send prices.
+`sellableCatalogObjectId` is a wholesale catalog **item variation** id. `name` is required. `qtyOrdered` is a positive number. `estimatedTotal` is dollars. `createInvoice` is optional; omit it or send `false` to skip the invoice. INV001–INV056 are rejected.
 
 Success:
 
@@ -61,77 +76,84 @@ Success:
 {
   "token": "…",
   "pickUrl": "https://rachael-production-log.vercel.app/pick/…",
-  "sheetUrl": "https://rachael-production-log.vercel.app/api/pick/…/sheet"
+  "sheetUrl": "https://rachael-production-log.vercel.app/api/pick/…/sheet",
+  "qrUrl": "https://rachael-production-log.vercel.app/api/pick/…/qr"
 }
 ```
+
+`qrUrl` is an SVG image of the QR. The QR encodes `pickUrl`. Claude can embed `qrUrl` on the PDF.
 
 ```bash
 curl -sS -X POST "https://rachael-production-log.vercel.app/api/pick/maurice-restock/create" \
   -H "Authorization: Bearer YOUR_BRIDGE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"lines":[{"catalogObjectId":"VARIATION_ID","name":"Stuffed shrimp","orderedQty":4}]}'
+  -d '{"PRINT_DAY":"Tue","date":"2026-09-22","estimatedTotal":"48.00","lines":[{"sellableCatalogObjectId":"VARIATION_ID","name":"Stuffed shrimp","qtyOrdered":4}]}'
 ```
 
-## Sheet and phone
+## Sheet, QR image, and phone
 
-`GET /api/pick/[token]/sheet` — printable HTML. Large QR encodes `pickUrl`. The page lists each item and ordered quantity. No bridge key; the token is the secret.
+`GET /api/pick/[token]/qr` — `image/svg+xml` for the PDF. No bridge key. The token is the secret.
 
-`GET /pick/[token]` — phone page. Each line is an input defaulting to `orderedQty` with `max` set to that ordered quantity. Short a line by editing that number down. Leave the others. Then **Send**.
+`GET /api/pick/[token]/sheet` — printable HTML with the same QR, `PRINT_DAY`, date, estimated total, and ordered quantities. The page states that inventory is not changed until Send.
 
-`POST /api/pick/[token]/send` — JSON body optional.
+`GET /pick/[token]` — phone. Inputs default to `qtyOrdered` and `max` is that ordered quantity. One tap Send if the pull was full. Lower only the short lines. Then Send.
+
+`POST /api/pick/[token]/send` — body optional.
 
 ```json
-{ "lines": [{ "catalogObjectId": "VARIATION_ID", "qty": 3 }] }
+{ "lines": [{ "sellableCatalogObjectId": "VARIATION_ID", "qty": 3 }] }
 ```
 
-Omitted lines stay at the ordered quantity. A line can be `0` (nothing left). At least one line must be above 0. Quantity cannot be raised. The first Send locks those quantities. If Square fails afterward, reload and Send again; the retry reuses the locked quantities and the same Square idempotency key. It does not re-key the whole order.
+Omitted lines stay at `qtyOrdered`. Quantity cannot be raised. At least one line must be above 0.
 
-Success and the idempotent replay both return **200**:
+Success and the idempotent replay are both **200**:
 
 ```json
 {
   "alreadySent": false,
-  "token": "…",
   "status": "sent",
-  "invoiceId": "…",
-  "invoiceNumber": "1042",
-  "orderId": "…",
-  "publicUrl": null,
-  "lines": [{ "catalogObjectId": "VARIATION_ID", "name": "Stuffed shrimp", "orderedQty": "4", "qty": "3" }]
+  "printDay": "Tue",
+  "date": "2026-09-22",
+  "estimatedTotal": "48.00",
+  "finalTotal": "36.00",
+  "shorts": [
+    {
+      "sellableCatalogObjectId": "VARIATION_ID",
+      "name": "Stuffed shrimp",
+      "qtyOrdered": "4",
+      "qtySent": "3",
+      "delta": "1"
+    }
+  ],
+  "invoiceId": null,
+  "lines": []
 }
 ```
 
-`alreadySent` is `true` when this token was already sent. `publicUrl` is whatever Square returned. The phone shows **Already sent** and the invoice number. It does not link Maurice to a card checkout. Wholesale still collects the weekly check and records it in the Square Dashboard.
+`finalTotal` is the sum of sent quantity times the catalog variation price. It is null if a sent line has no Square price. `alreadySent` is true on the second call. The phone shows **Already sent**, the final total, and the short deltas.
 
 ## Environment
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `BRIDGE_API_KEY` | Yes, for create | Same shared secret as `/api/square/*`. Create returns 503 if unset. |
-| `SQUARE_WHOLESALE_TOKEN` | Yes, for send | Wholesale access token. Falls back to `SQUARE_TOKEN`. Needs `INVENTORY_WRITE`, `INVOICES_WRITE`, `ORDERS_WRITE`, and `ITEMS_READ`. |
-| `SQUARE_WHOLESALE_LOCATION_ID` | Yes, for send | Wholesale location for the inventory adjustment and the invoice. Falls back to `SQUARE_LOCATION_ID`. |
-| `SQUARE_MAURICE_CUSTOMER_ID` | No | Maurice as a **customer on the wholesale account**, not the Maurice cafe merchant token. Default `TQ8JFGXMZGTY8JNKCY1TV72618`. |
-| `APP_BASE_URL` | No | Origin baked into `pickUrl` and `sheetUrl`. Example `https://rachael-production-log.vercel.app`. When unset, production uses that host. Local `next dev` uses the request host. |
+| `BRIDGE_API_KEY` | Yes, for create | Same secret as `/api/square/*`. |
+| `SQUARE_WHOLESALE_TOKEN` | Yes, for send | Wholesale token. Fallback `SQUARE_TOKEN`. Needs `INVENTORY_WRITE` and `ITEMS_READ`. Add `INVOICES_WRITE`, `ORDERS_WRITE`, and `CUSTOMERS_READ` only if invoices are turned on. |
 | `NEXT_PUBLIC_SUPABASE_URL` | Yes, in production | Supabase project URL. |
-| `SUPABASE_SERVICE_KEY` | Yes, in production | Service role key. Server-only. Never expose it to the browser. |
+| `SUPABASE_SERVICE_KEY` | Yes, in production | Service role key. Server-only. |
+| `APP_BASE_URL` | No | Origin baked into the QR. Production default `https://rachael-production-log.vercel.app`. |
+| `SQUARE_MAURICE_CUSTOMER_ID` | No | Maurice as a **customer on the wholesale account** (Rachaels Cafe Maurice). Default `TQ8JFGXMZGTY8JNKCY1TV72618`. |
+| `MAURICE_PICK_CREATE_INVOICE` | No | Set to `1` to book the unpaid invoice on every Send. Default off. A payload `createInvoice: true` turns it on for that night only. |
+| `JORDAN_NOTIFY_WEBHOOK` | No | http(s) URL that receives the final total and shorts. Not Twilio. |
 
-`PAYMENTS_WRITE` is not used. Do not add a payments call to finish this flow.
+The adjustment location is **not** taken from `SQUARE_WHOLESALE_LOCATION_ID`. Send always uses `L6D106R4VNA72`.
+
+`PAYMENTS_WRITE` is not used.
 
 ## Blockers
 
-Live Send fails closed until these are true. Tokens in Square error text are redacted. Square 401/403 comes back as **502**.
-
-1. **`pick_tokens` table.** Apply `supabase/pick_tokens.sql`. Confirm `SUPABASE_SERVICE_KEY` is the service role key already used by Batch Tracker, set in Vercel and not in git.
-2. **Wholesale Square token scopes.** `SQUARE_WHOLESALE_TOKEN` (fallback `SQUARE_TOKEN`) needs:
-   - `INVENTORY_WRITE` — inventory adjustment decrease
-   - `INVOICES_WRITE` — CreateInvoice, PublishInvoice
-   - `ORDERS_WRITE` — CreateOrder
-   - `ITEMS_READ` — catalog variation lookup (Square does not publish a `CATALOG_READ` scope)
-   - `CUSTOMERS_READ` — the existing unpaid-invoice publish path reads the customer profile onto the recipient
-   The current bridge token may be read-only. Send will not succeed until the wholesale token includes those scopes. `PAYMENTS_WRITE` is the scope Square uses to charge a card. This feature does not use it.
-3. **Maurice customer profile.** Default id `TQ8JFGXMZGTY8JNKCY1TV72618`, or `SQUARE_MAURICE_CUSTOMER_ID`. Square requires a phone or email on that customer before publish. `SHARE_MANUALLY` does not email or text the invoice.
-4. **Accepted payment method.** Unchanged from [wholesale-text-orders.md](wholesale-text-orders.md): card is enabled only so Square will publish, with `automatic_payment_source: NONE`. This app still never charges. The weekly check is recorded by staff.
-5. **Inventory tracking.** Each variation must be inventory-tracked at the wholesale location. Square rejects an adjustment when it is not. A failed Send stays in `sending` with the quantities locked; fix the catalog and Send again on the same QR.
-6. **`APP_BASE_URL`.** Set it if the deployment host is not `https://rachael-production-log.vercel.app`, so printed QRs do not point at the wrong origin.
-
-Out of scope: the 2am Maurice par planner, Twilio, customer SMS, and charging the invoice.
+1. **Claude prompt.** Step 7 must stop deducting before any live QR is scanned. This is the double-deduct risk.
+2. **`pick_tokens` table** and `SUPABASE_SERVICE_KEY`.
+3. **Wholesale token** with `INVENTORY_WRITE` and `ITEMS_READ`. Invoice scopes only if `createInvoice` is on.
+4. **Counting items.** INV001–INV056 stay on the 2am count. They are rejected here even if a sellable id's SKU is one of those codes.
+5. **Jordan notify.** With no webhook, the summary is still in the Send response, the server log, and the phone's Already sent screen.
+6. **`APP_BASE_URL`** if the public host is not the production default, so the PDF QR points at the right origin.

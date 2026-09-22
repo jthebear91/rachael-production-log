@@ -1,7 +1,7 @@
 import { sendBridgeError } from '../../../../lib/bridge-auth'
 import { sendMauricePick } from '../../../../lib/maurice-pick'
 import { createUnpaidInvoice } from '../../../../lib/square-invoices.js'
-import { resolveAccount, resolveLocationId, squareFetch } from '../../../../lib/square-client.js'
+import { resolveAccount, squareFetch } from '../../../../lib/square-client.js'
 
 // The unguessable pick token is the capability. The phone that scans the
 // sheet does not have BRIDGE_API_KEY, so this route does not use that gate.
@@ -21,7 +21,6 @@ export default async function handler(req, res) {
       token: req.query.token,
       body: req.body,
       resolveAccount,
-      resolveLocationId,
       squareFetch,
       createUnpaidInvoice
     })

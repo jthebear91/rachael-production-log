@@ -7,6 +7,11 @@ const EMPTY = {
   error: '',
   token: '',
   status: '',
+  printDay: '',
+  pickDate: '',
+  estimatedTotal: '',
+  finalTotal: '',
+  shorts: [],
   note: '',
   alreadySent: false,
   locked: false,
@@ -45,13 +50,13 @@ export default function PickPage(props) {
   )
 }
 
-function PickForm({ token, note, alreadySent, locked, invoiceNumber, lines }) {
+function PickForm({ token, printDay, pickDate, estimatedTotal, finalTotal, shorts, alreadySent, locked, invoiceNumber, lines }) {
   const [qtys, setQtys] = useState(() => {
     const initial = {}
-    for (const line of lines) initial[line.catalogObjectId] = line.qty
+    for (const line of lines) initial[line.sellableCatalogObjectId] = line.qty
     return initial
   })
-  const [done, setDone] = useState(alreadySent ? { invoiceNumber, lines } : null)
+  const [done, setDone] = useState(alreadySent ? { invoiceNumber, lines, finalTotal, estimatedTotal, shorts } : null)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -60,17 +65,17 @@ function PickForm({ token, note, alreadySent, locked, invoiceNumber, lines }) {
     if (submitting || done) return
     const payloadLines = []
     for (const line of lines) {
-      const raw = String(qtys[line.catalogObjectId] ?? '').trim()
+      const raw = String(qtys[line.sellableCatalogObjectId] ?? '').trim()
       if (!/^\d+(\.\d{1,5})?$/.test(raw)) {
         setError('Enter a quantity from 0 up to the ordered amount.')
         return
       }
       const n = Number(raw)
-      if (n < 0 || n > Number(line.orderedQty)) {
+      if (n < 0 || n > Number(line.qtyOrdered)) {
         setError('Quantity cannot be higher than ordered.')
         return
       }
-      payloadLines.push({ catalogObjectId: line.catalogObjectId, qty: String(n) })
+      payloadLines.push({ sellableCatalogObjectId: line.sellableCatalogObjectId, qty: String(n) })
     }
     if (!payloadLines.some(line => Number(line.qty) > 0)) {
       setError('Send at least one item.')
@@ -92,7 +97,10 @@ function PickForm({ token, note, alreadySent, locked, invoiceNumber, lines }) {
       }
       setDone({
         invoiceNumber: data.invoiceNumber || invoiceNumber || '',
-        lines: Array.isArray(data.lines) && data.lines.length ? data.lines : lines
+        lines: Array.isArray(data.lines) && data.lines.length ? data.lines : lines,
+        finalTotal: data.finalTotal || '',
+        estimatedTotal: data.estimatedTotal || estimatedTotal || '',
+        shorts: Array.isArray(data.shorts) ? data.shorts : []
       })
     } catch {
       setError('Could not send')
@@ -106,12 +114,24 @@ function PickForm({ token, note, alreadySent, locked, invoiceNumber, lines }) {
       <main style={s.page}>
         <p style={s.kicker}>Wholesale → Maurice</p>
         <h1 style={s.h1}>Already sent</h1>
+        {done.finalTotal ? <p style={s.note}>Final total ${done.finalTotal}</p> : null}
+        {done.estimatedTotal ? <p style={s.note}>Estimated was ${done.estimatedTotal}</p> : null}
         {done.invoiceNumber ? <p style={s.note}>Invoice {done.invoiceNumber}</p> : null}
+        {Array.isArray(done.shorts) && done.shorts.length ? (
+          <ul style={s.list}>
+            {done.shorts.map(line => (
+              <li key={line.sellableCatalogObjectId} style={s.sentRow}>
+                <span>{line.name}</span>
+                <span>short {line.delta}</span>
+              </li>
+            ))}
+          </ul>
+        ) : <p style={s.note}>No shorts. Full pick sent.</p>}
         <ul style={s.list}>
           {sentLines.map(line => (
-            <li key={line.catalogObjectId} style={s.sentRow}>
-              <span>{line.name || line.catalogObjectId}</span>
-              <span>{line.qty || line.orderedQty} of {line.orderedQty}</span>
+            <li key={line.sellableCatalogObjectId} style={s.sentRow}>
+              <span>{line.name || line.sellableCatalogObjectId}</span>
+              <span>{line.qtySent || line.qty || line.qtyOrdered} of {line.qtyOrdered}</span>
             </li>
           ))}
         </ul>
@@ -121,31 +141,31 @@ function PickForm({ token, note, alreadySent, locked, invoiceNumber, lines }) {
 
   return (
     <form style={s.page} onSubmit={onSubmit}>
-      <p style={s.kicker}>Wholesale → Maurice</p>
+      <p style={s.kicker}>Wholesale → Maurice{printDay ? ` · ${printDay}` : ''}{pickDate ? ` · ${pickDate}` : ''}</p>
       <h1 style={s.h1}>Maurice restock</h1>
       <p style={s.note}>
         {locked
           ? 'This send already started. Quantities are locked. Tap Send to finish.'
           : 'Leave each number alone unless the pull was short. You can only lower it.'}
       </p>
-      {note ? <p style={s.note}>{note}</p> : null}
+      {estimatedTotal ? <p style={s.note}>Estimated total ${estimatedTotal}</p> : null}
       <ul style={s.list}>
         {lines.map(line => (
-          <li key={line.catalogObjectId} style={s.row}>
-            <label htmlFor={`qty-${line.catalogObjectId}`} style={s.label}>{line.name}</label>
-            <div style={s.ordered}>Ordered {line.orderedQty}</div>
+          <li key={line.sellableCatalogObjectId} style={s.row}>
+            <label htmlFor={`qty-${line.sellableCatalogObjectId}`} style={s.label}>{line.name}</label>
+            <div style={s.ordered}>Ordered {line.qtyOrdered}</div>
             <input
-              id={`qty-${line.catalogObjectId}`}
-              name={line.catalogObjectId}
+              id={`qty-${line.sellableCatalogObjectId}`}
+              name={line.sellableCatalogObjectId}
               type="number"
               inputMode="decimal"
               min="0"
-              max={line.orderedQty}
+              max={line.qtyOrdered}
               step="any"
-              value={qtys[line.catalogObjectId]}
+              value={qtys[line.sellableCatalogObjectId]}
               disabled={locked || submitting}
               onChange={event => {
-                setQtys(current => ({ ...current, [line.catalogObjectId]: event.target.value }))
+                setQtys(current => ({ ...current, [line.sellableCatalogObjectId]: event.target.value }))
               }}
               style={s.input}
             />

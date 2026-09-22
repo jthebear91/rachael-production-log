@@ -21,8 +21,10 @@ Daily production logging app for Rachael's Wholesale LLC.
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase Project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase Publishable Key |
 | `SUPABASE_SERVICE_KEY` | Supabase service role key for Batch Tracker writes and Maurice pick tokens. Server-only. |
-| `APP_BASE_URL` | Public origin encoded in Maurice restock QR codes. Defaults to `https://rachael-production-log.vercel.app` in production. |
-| `SQUARE_MAURICE_CUSTOMER_ID` | Maurice's customer id on the **wholesale** Square account. Optional. Used by the restock pick Send. |
+| `APP_BASE_URL` | Public origin encoded in Maurice pick QR codes. Defaults to `https://rachael-production-log.vercel.app` in production. |
+| `SQUARE_MAURICE_CUSTOMER_ID` | Maurice's customer id on the **wholesale** Square account. Optional. Used only if the unpaid pick invoice is enabled. |
+| `MAURICE_PICK_CREATE_INVOICE` | Set to `1` to book an unpaid Maurice invoice when a pick is sent. Default off, so Send only adjusts inventory. |
+| `JORDAN_NOTIFY_WEBHOOK` | Optional URL for the post-pull total and shorts. Not Twilio. |
 | `TODOIST_TOKEN` | Todoist API Token |
 | `TODOIST_COOK_PROJECT_ID` | Todoist Cook Board Project ID (optional) |
 | `TWILIO_ACCOUNT_SID` | Twilio account for the wholesale text webhook. Webhook returns 503 if this and `TWILIO_AUTH_TOKEN` are unset (except a non-production dev bypass). |
@@ -43,5 +45,5 @@ The Daily Log at `/` stays open. Only Sales (`/dashboard` and APIs that return r
 - Track batch yields over time in Supabase
 - Read-only Square bridge for assistants (`GET /api/square/*`) — see [docs/square-bridge.md](docs/square-bridge.md)
 - Unpaid wholesale invoices from text (`POST /api/square/invoices/create` and the Twilio inbound stub) — see [docs/wholesale-text-orders.md](docs/wholesale-text-orders.md)
-- Maurice restock pick QR (print sheet, phone Send, wholesale inventory decrease, unpaid invoice) — see [docs/maurice-restock-pick-qr.md](docs/maurice-restock-pick-qr.md)
+- Maurice nightly pick QR (mint does not deduct; Send adjusts wholesale `L6D106R4VNA72` only) — see [docs/maurice-restock-pick-qr.md](docs/maurice-restock-pick-qr.md)
 - Sales dashboard at `/dashboard` (today / WTD / MTD per location, America/Chicago). Gated by `SALES_DASHBOARD_PIN`; Daily Log is not.

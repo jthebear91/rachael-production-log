@@ -1,6 +1,8 @@
 # Square read-only bridge
 
-HTTP API for assistants to **read** Square catalog, inventory, orders, payments, and sales totals from this app. It does **not** create orders, take payments, or adjust inventory.
+HTTP API for assistants to **read** Square catalog, inventory, orders, payments, and sales totals from this app. GET routes do **not** create orders, take payments, or adjust inventory.
+
+Unpaid wholesale invoice **writes** are a separate route, `POST /api/square/invoices/create`. They never call Square Payments. See [wholesale-text-orders.md](wholesale-text-orders.md).
 
 Existing Daily Log routes stay as they are:
 
@@ -51,7 +53,7 @@ Success: `{ "data": ... }` and `"cursor"` when Square has another page.
 
 Error: `{ "error": "message" }` (Square messages only; tokens are never returned).
 
-All bridge routes are **GET**. Square Search Orders / inventory counts use POST internally; that is still read-only.
+Read bridge routes are **GET**. Square Search Orders / inventory counts use POST internally; that is still read-only. The only bridge write is `POST /api/square/invoices/create` (unpaid wholesale invoices). `GET /api/square/payments` stays a read of List Payments.
 
 Default page size is capped (`orders` 50, max 100; `payments` 100; `inventory` 100, max 200). Pass `cursor` from the previous response to continue.
 
@@ -91,7 +93,11 @@ Square Orders Search for `created_at` in `[begin, end]`, newest first.
 
 ### `GET /api/square/payments`
 
-Square List Payments for sales totals in the same time window.
+Square List Payments for sales totals in the same time window. Read-only. This route does not create or complete payments.
+
+### `POST /api/square/invoices/create`
+
+Creates an **unpaid** wholesale invoice (order + invoice + publish, no Square Payment). Bridge key required. Body and blockers: [wholesale-text-orders.md](wholesale-text-orders.md).
 
 ### `GET /api/square/sales`
 

@@ -1,13 +1,12 @@
 import { sendBridgeError } from '../../../../lib/bridge-auth'
 import { sendMauricePick } from '../../../../lib/maurice-pick'
-import { createUnpaidInvoice } from '../../../../lib/square-invoices.js'
 import { resolveAccount, squareFetch } from '../../../../lib/square-client.js'
 
 // The unguessable pick token is the capability. The phone that scans the
 // sheet does not have BRIDGE_API_KEY, so this route does not use that gate.
-// Create stays on the bridge key. This handler books an unpaid invoice
-// through createUnpaidInvoice and a wholesale inventory decrease. It does
-// not call a charge endpoint.
+// Create stays on the bridge key. Send adjusts wholesale inventory only
+// when live deduct is armed, appends priced lines to the week log, and
+// notifies Jordan. It does not create an invoice and does not call Payments.
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store')
@@ -21,8 +20,7 @@ export default async function handler(req, res) {
       token: req.query.token,
       body: req.body,
       resolveAccount,
-      squareFetch,
-      createUnpaidInvoice
+      squareFetch
     })
     res.status(200).json(data)
   } catch (err) {

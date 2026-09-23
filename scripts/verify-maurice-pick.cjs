@@ -29,6 +29,8 @@ const {
   sendMauricePick
 } = require('../lib/maurice-pick')
 const { loadPickSheet, renderPickSheet } = require('../lib/pick-sheet')
+const { priorMonSat } = require('../lib/chicago-time')
+const { createMauriceWeekInvoice } = require('../lib/maurice-week')
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg)
@@ -151,6 +153,12 @@ async function testValidation() {
   assert(liveInventoryDeductEnabled({ MAURICE_PICK_SEND_DRY_RUN: '0' }) === false, 'dry-run off alone stays dry')
   assert(liveInventoryDeductEnabled({ MAURICE_PICK_SEND_DRY_RUN: '0', MAURICE_PICK_LIVE_DEDUCT: '1' }) === true, 'both gates open live deduct')
   assert(liveInventoryDeductEnabled({ MAURICE_PICK_SEND_DRY_RUN: '1', MAURICE_PICK_LIVE_DEDUCT: '1' }) === false, 'dry-run kill switch wins')
+  const forced = parseCreateBody(nightly([{ sellableCatalogObjectId: 'VAR1', name: 'Shrimp', qtyOrdered: 1 }], { createInvoice: true }))
+  assert(forced.ok && forced.value.createInvoice === false, 'daily create ignores invoice flag')
+  const monday = priorMonSat(new Date('2026-09-28T16:00:00.000Z'))
+  assert(monday.weekStart === '2026-09-21' && monday.weekEnd === '2026-09-26', JSON.stringify(monday))
+  const sunday = priorMonSat(new Date('2026-09-27T16:00:00.000Z'))
+  assert(sunday.weekStart === '2026-09-14' && sunday.weekEnd === '2026-09-19', JSON.stringify(sunday))
 
   assert(mauriceCustomerId({}) === DEFAULT_MAURICE_CUSTOMER_ID, 'default Maurice customer')
   assert(mauriceCustomerId({ SQUARE_MAURICE_CUSTOMER_ID: 'CUST_MAURICE' }) === 'CUST_MAURICE', 'customer override')
@@ -390,9 +398,12 @@ async function testCreateSend(createUnpaidInvoice) {
   assert(!paths.some(item => item.toLowerCase().includes('payment')), `payment path in ${paths.join(',')}`)
   assert(!paths.includes('/orders'), `default send must not orders.create: ${paths.join(',')}`)
   assert(!paths.includes(INVENTORY_PATH), `default send must not batchChange: ${paths.join(',')}`)
+  assert(!paths.includes('/invoices'), `daily send must not invoice: ${paths.join(',')}`)
   assert(paths.includes('/catalog/object/VAR_A'), 'catalog read still runs in dry-run')
   assert(result.dryRun === true, 'default send is a dry run')
   assert(result.inventoryAdjusted === false, 'default send does not adjust inventory')
+  assert(result.weekLogged === true, 'dry-run still appends the week log')
+  assert(result.invoiceId == null, 'daily send has no invoice id')
 
   const before = square.calls.length
   const again = await sendMauricePick({
@@ -572,29 +583,9 @@ async function testLockedRetry(createUnpaidInvoice) {
   assert(adjustments.every(call => call.body.changes[0].adjustment.location_id === 'L6D106R4VNA72'), 'retry stays on wholesale location')
 }
 
-async function testOptionalInvoice(createUnpaidInvoice) {
-  const dryStore = createMemoryPickStore()
-  const dryEnv = { APP_BASE_URL: 'https://pick.example' }
-  const dryCreated = await createMauricePick({
-    env: dryEnv,
-    store: dryStore,
-    body: nightly(
-      [{ sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 2 }],
-      { createInvoice: true }
-    )
-  })
-  const drySquare = fakeSquare()
-  const drySent = await sendMauricePick({
-    ...sendDeps(dryStore, drySquare, dryEnv),
-    createUnpaidInvoice,
-    token: dryCreated.token
-  })
-  assert(drySent.dryRun === true && drySent.invoiceId === 'INV1', 'dry-run can still invoice')
-  assert(!drySquare.calls.some(call => call.path === INVENTORY_PATH), 'invoice does not turn on deduct')
-  assert(drySquare.calls.some(call => call.path === '/orders'), 'invoice still needs a backing order')
-
+async function testDailySendNeverInvoices(createUnpaidInvoice) {
   const store = createMemoryPickStore()
-  const env = liveEnv({ APP_BASE_URL: 'https://pick.example' })
+  const env = liveEnv({ APP_BASE_URL: 'https://pick.example', MAURICE_PICK_CREATE_INVOICE: '1' })
   const created = await createMauricePick({
     env,
     store,
@@ -603,22 +594,107 @@ async function testOptionalInvoice(createUnpaidInvoice) {
       { createInvoice: true }
     )
   })
+  assert((await getMauricePick(created.token, { store })).createInvoice === false, 'stored invoice flag stays off')
   const square = fakeSquare()
   const sent = await sendMauricePick({
     ...sendDeps(store, square, env),
     createUnpaidInvoice,
     token: created.token
   })
-  assert(sent.invoiceId === 'INV1', 'opt-in invoice')
+  assert(sent.inventoryAdjusted === true && sent.invoiceId == null, 'live send deducts and does not invoice')
   const paths = square.calls.map(call => call.path)
-  const inventoryAt = paths.indexOf(INVENTORY_PATH)
-  const orderAt = paths.indexOf('/orders')
-  assert(inventoryAt !== -1 && orderAt !== -1 && inventoryAt < orderAt, 'deduct before invoice order')
+  assert(paths.includes(INVENTORY_PATH), 'live send still deducts')
+  assert(!paths.includes('/orders') && !paths.includes('/invoices'), `daily send called invoice paths: ${paths.join(',')}`)
+  const saved = await getMauricePick(created.token, { store })
+  assert(saved.pricedLines[0].qtySent === '2' && saved.pricedLines[0].lineTotalCents === 2000, 'week log stores the priced line')
+}
+
+async function sendLivePick(store, env, date, lines, qtyById, createUnpaidInvoice) {
+  const created = await createMauricePick({
+    env,
+    store,
+    body: nightly(lines, { date })
+  })
+  const square = fakeSquare()
+  await sendMauricePick({
+    ...sendDeps(store, square, env),
+    createUnpaidInvoice,
+    token: created.token,
+    body: qtyById ? { lines: qtyById } : undefined
+  })
+  return created
+}
+
+async function testWeekInvoice(createUnpaidInvoice) {
+  const store = createMemoryPickStore()
+  const live = liveEnv({ APP_BASE_URL: 'https://pick.example' })
+  const dry = { APP_BASE_URL: 'https://pick.example' }
+  await sendLivePick(store, live, '2026-09-21', [
+    { sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 4 },
+    { sellableCatalogObjectId: 'VAR_B', name: 'Gumbo', qtyOrdered: 2 }
+  ], [
+    { sellableCatalogObjectId: 'VAR_A', qty: 1 }
+  ], createUnpaidInvoice)
+  await sendLivePick(store, live, '2026-09-26', [
+    { sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 3 }
+  ], null, createUnpaidInvoice)
+  await sendLivePick(store, dry, '2026-09-22', [
+    { sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 4 }
+  ], null, createUnpaidInvoice)
+  await sendLivePick(store, live, '2026-09-28', [
+    { sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 9 }
+  ], null, createUnpaidInvoice)
+
+  const square = fakeSquare()
+  const deps = {
+    store,
+    env: live,
+    now: () => new Date('2026-09-28T16:00:00.000Z'),
+    createUnpaidInvoice,
+    resolveAccount: () => wholesaleAccount(),
+    squareFetch: square.squareFetch
+  }
+  const rolled = await createMauriceWeekInvoice(deps)
+  assert(rolled.alreadyInvoiced === false && rolled.invoiced === true, 'monday creates one invoice')
+  assert(rolled.weekStart === '2026-09-21' && rolled.weekEnd === '2026-09-26', 'prior mon-sat')
+  assert(rolled.customerId === DEFAULT_MAURICE_CUSTOMER_ID, rolled.customerId)
+  assert(rolled.pickCount === 2 && rolled.dryRunSkipped === 1, `counts ${rolled.pickCount} skipped ${rolled.dryRunSkipped}`)
+  assert(rolled.loggedTotal === '60.00', rolled.loggedTotal)
+  const qtyById = Object.fromEntries(rolled.lines.map(line => [line.sellableCatalogObjectId, line.qty]))
+  assert(qtyById.VAR_A === '4' && qtyById.VAR_B === '2', JSON.stringify(qtyById))
+  const paths = square.calls.map(call => call.path)
+  assert(!paths.includes(INVENTORY_PATH), 'rollup does not deduct')
+  assert(!paths.some(item => item.toLowerCase().includes('payment')), 'rollup does not call payments')
+  const order = square.calls.find(call => call.path === '/orders').body
+  assert(order.order.location_id === 'L6D106R4VNA72', order.order.location_id)
+  assert(order.order.customer_id === DEFAULT_MAURICE_CUSTOMER_ID, 'order customer')
+  assert(order.idempotency_key === 'mp-week-2026-09-21', order.idempotency_key)
   const invoice = square.calls.find(call => call.path === '/invoices').body
   assert(invoice.invoice.delivery_method === 'SHARE_MANUALLY', 'manual share')
   assert(invoice.invoice.payment_requests[0].automatic_payment_source === 'NONE', 'no auto charge')
-  assert(invoice.invoice.primary_recipient.customer_id === DEFAULT_MAURICE_CUSTOMER_ID, 'Maurice customer')
-  assert(!paths.some(item => item.toLowerCase().includes('payment')), 'no payment path')
+  assert(invoice.invoice.primary_recipient.customer_id === DEFAULT_MAURICE_CUSTOMER_ID, 'invoice customer')
+  const before = square.calls.length
+  const again = await createMauriceWeekInvoice(deps)
+  assert(again.alreadyInvoiced === true && again.invoiceId === rolled.invoiceId, 'second monday is idempotent')
+  assert(square.calls.length === before, 'second monday does not call Square')
+
+  const emptyStore = createMemoryPickStore()
+  const emptySquare = fakeSquare()
+  const empty = await createMauriceWeekInvoice({
+    ...deps,
+    store: emptyStore,
+    squareFetch: emptySquare.squareFetch
+  })
+  assert(empty.invoiced === false && empty.reason === 'No live sent picks in this week', empty.reason)
+  assert(emptySquare.calls.length === 0, 'empty week does not call Square')
+
+  let rejected = false
+  try {
+    await createMauriceWeekInvoice({ ...deps, body: { weekStart: '2026-09-22' } })
+  } catch (err) {
+    rejected = err.status === 400
+  }
+  assert(rejected, 'weekStart must be a Monday')
 }
 
 async function testCountingSku(createUnpaidInvoice) {
@@ -665,6 +741,8 @@ function testSourceShape() {
     'lib/pick-store.js',
     'lib/pick-sheet.js',
     'pages/api/pick/maurice-restock/create.js',
+    'pages/api/pick/maurice-restock/week-invoice.js',
+    'lib/maurice-week.js',
     'pages/api/pick/[token]/send.js',
     'pages/api/pick/[token]/sheet.js',
     'pages/api/pick/[token]/qr.js',
@@ -678,9 +756,13 @@ function testSourceShape() {
     }
   }
   const send = fs.readFileSync(path.join(root, 'pages/api/pick/[token]/send.js'), 'utf8')
-  assert(send.includes('createUnpaidInvoice'), 'send uses unpaid invoice helper')
+  assert(!send.includes('createUnpaidInvoice'), 'daily send does not create an invoice')
   assert(send.includes('squareFetch'), 'send uses shared Square client')
   assert(!send.includes('authorizeBridge'), 'phone send is not bridge-gated')
+  const week = fs.readFileSync(path.join(root, 'pages/api/pick/maurice-restock/week-invoice.js'), 'utf8')
+  assert(week.includes('createUnpaidInvoice'), 'monday rollup uses the unpaid invoice helper')
+  assert(week.includes('authorizeBridge'), 'monday rollup uses the bridge key')
+  assert(!week.includes('SQUARE_LAFAYETTE'), 'monday rollup does not use the Lafayette account')
   const create = fs.readFileSync(path.join(root, 'pages/api/pick/maurice-restock/create.js'), 'utf8')
   assert(create.includes('authorizeBridge'), 'create uses bridge auth')
   assert(create.includes('createMauricePick'), 'create handler')
@@ -694,6 +776,7 @@ function testSourceShape() {
   assert(pickSrc.includes('WHOLESALE_PICK_LOCATION_ID'), 'location is fixed in code')
   const sql = fs.readFileSync(path.join(root, 'supabase/pick_tokens.sql'), 'utf8')
   assert(sql.includes('pick_tokens') && sql.includes('enable row level security'), 'sql creates locked table')
+  assert(sql.includes('pick_week_invoices') && sql.includes('priced_lines'), 'sql stores the week log and rollup')
 }
 
 async function main() {
@@ -704,7 +787,8 @@ async function main() {
   await testLiveDeduct(createUnpaidInvoice)
   await testDryRunLog(createUnpaidInvoice)
   await testLockedRetry(createUnpaidInvoice)
-  await testOptionalInvoice(createUnpaidInvoice)
+  await testDailySendNeverInvoices(createUnpaidInvoice)
+  await testWeekInvoice(createUnpaidInvoice)
   await testCountingSku(createUnpaidInvoice)
   testSourceShape()
   console.log('verify-maurice-pick: ok')

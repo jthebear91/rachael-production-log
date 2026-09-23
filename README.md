@@ -22,10 +22,9 @@ Daily production logging app for Rachael's Wholesale LLC.
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase Publishable Key |
 | `SUPABASE_SERVICE_KEY` | Supabase service role key for Batch Tracker writes and Maurice pick tokens. Server-only. |
 | `APP_BASE_URL` | Public origin encoded in Maurice pick QR codes. Defaults to `https://rachael-production-log.vercel.app` in production. |
-| `SQUARE_MAURICE_CUSTOMER_ID` | Maurice's customer id on the **wholesale** Square account. Optional. Used only if the unpaid pick invoice is enabled. |
-| `MAURICE_PICK_SEND_DRY_RUN` | Default on (unset counts as on). Send records the pull and logs the intended `IN_STOCK` → `SOLD` adjustment. It does not call `inventory.batchChange`. Set to `0` only together with `MAURICE_PICK_LIVE_DEDUCT=1`, after the Claude step 7 edit. |
+| `SQUARE_MAURICE_CUSTOMER_ID` | Maurice's customer id on the **wholesale** Square account. Optional. Used by the Monday unpaid rollup. Default `TQ8JFGXMZGTY8JNKCY1TV72618`. |
+| `MAURICE_PICK_SEND_DRY_RUN` | Default on (unset counts as on). Send records the pull, appends the week log, and logs the intended `IN_STOCK` → `SOLD` adjustment. It does not call `inventory.batchChange` and it does not create an invoice. Set to `0` only together with `MAURICE_PICK_LIVE_DEDUCT=1`, after the Claude step 7 edit. |
 | `MAURICE_PICK_LIVE_DEDUCT` | Default off. Set to `1` with `MAURICE_PICK_SEND_DRY_RUN=0` to deduct final quantities at wholesale location `L6D106R4VNA72`. |
-| `MAURICE_PICK_CREATE_INVOICE` | Set to `1` to book an unpaid Maurice invoice when a pick is sent. Default off. Separate from the inventory gate. |
 | `JORDAN_NOTIFY_WEBHOOK` | Optional URL for the post-pull total and shorts. Not Twilio. |
 | `TODOIST_TOKEN` | Todoist API Token |
 | `TODOIST_COOK_PROJECT_ID` | Todoist Cook Board Project ID (optional) |
@@ -47,5 +46,5 @@ The Daily Log at `/` stays open. Only Sales (`/dashboard` and APIs that return r
 - Track batch yields over time in Supabase
 - Read-only Square bridge for assistants (`GET /api/square/*`) — see [docs/square-bridge.md](docs/square-bridge.md)
 - Unpaid wholesale invoices from text (`POST /api/square/invoices/create` and the Twilio inbound stub) — see [docs/wholesale-text-orders.md](docs/wholesale-text-orders.md)
-- Maurice nightly pick QR (mint does not deduct; Send is dry-run until `MAURICE_PICK_LIVE_DEDUCT=1` and `MAURICE_PICK_SEND_DRY_RUN=0`) — see [docs/maurice-restock-pick-qr.md](docs/maurice-restock-pick-qr.md)
+- Maurice nightly pick QR (daily Send is inventory plus a week log, dry-run until both live flags are set; Monday rolls the prior Mon–Sat into one unpaid wholesale invoice) — see [docs/maurice-restock-pick-qr.md](docs/maurice-restock-pick-qr.md)
 - Sales dashboard at `/dashboard` (today / WTD / MTD per location, America/Chicago). Gated by `SALES_DASHBOARD_PIN`; Daily Log is not.

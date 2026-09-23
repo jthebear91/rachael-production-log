@@ -16,11 +16,13 @@ Today the Claude prompt does this, in order:
 
 This app **does not deduct when it mints a token.** Mint only stores `PRINT_DAY`, the date, the sellable lines, and `estimatedTotal`, then returns URLs.
 
-**Send does not deduct by default either.** Live `inventory.batchChange` is off until both gates below are open. A Send in the default dry-run still marks the pick sent, logs the adjustment it would have made, and can still book the optional unpaid invoice. It does not call `inventory.batchChange`.
+**Send does not deduct by default either.** Live `inventory.batchChange` is off until both gates below are open. A Send in the default dry-run still marks the pick sent, logs the adjustment it would have made, and appends priced lines to the week log. It does not call `inventory.batchChange`.
+
+**Daily Send never creates a Square invoice.** The unpaid invoice is a separate Monday morning rollup of the prior Mon–Sat live sends.
 
 **Do not open the live gate while Claude still runs step 7.** That job and a live Send would deduct the same wholesale stock twice.
 
-Hard never for this job: `payments.create`, Lafayette merge, adjusting INV001–INV056, and Twilio. `orders.create` stays out of the 2am prompt. The app calls it only when an unpaid invoice is explicitly turned on, and only as the invoice's backing order (see below). The invoice switch is separate from the inventory gate.
+Hard never for this job: `payments.create`, Lafayette merge, adjusting INV001–INV056, and Twilio. `orders.create` stays out of the 2am prompt and out of daily Send. The only `orders.create` in this feature is the backing order for the Monday unpaid invoice. Lafayette's Monday house-account auto-invoice is a different job and this route does not call it.
 
 ## Exact Claude prompt edit (replace step 7)
 
@@ -41,7 +43,6 @@ Content-Type: application/json
   "PRINT_DAY": "<PRINT_DAY>",
   "date": "<YYYY-MM-DD America/Chicago>",
   "estimatedTotal": "<dollars, for example 48.00>",
-  "createInvoice": false,
   "lines": [
     {
       "sellableCatalogObjectId": "<wholesale catalog item variation id>",
@@ -53,8 +54,9 @@ Content-Type: application/json
 
 Use the response fields token, pickUrl, sheetUrl, and qrUrl.
 Embed qrUrl on the PDF. qrUrl is an SVG of the QR code, and the QR encodes pickUrl.
-Do not also deduct inventory in this job. The phone Send is what records the physical pull.
-Leave createInvoice false. The unpaid Maurice invoice is a separate app switch.
+Do not also deduct inventory in this job. Do not create a Square invoice in this job.
+The phone Send records the physical pull and does not create an invoice.
+The Monday unpaid invoice is a separate call, documented below, not part of this 2am prompt.
 Then continue with notify and save the PDF under Documents/Wholesale Ordering/.
 ```
 
@@ -74,18 +76,38 @@ After the redeploy, Send calls `inventory.batchChange` for the final quantities 
 
 1. Catalog-read each sellable variation (SKU and price). If the id, name, or SKU is INV001–INV056, Send stops and does not adjust inventory. This happens in dry-run and in live mode.
 2. Build the `inventory.batchChange` body for the positive final quantities at `L6D106R4VNA72` (`IN_STOCK` → `SOLD`). Lines shorted to 0 are omitted. Idempotency key `mp-<token>` and `occurred_at` are fixed on the first Send.
-3. **Dry-run (default).** Do not call Square inventory. Log `maurice_pick_inventory_dry_run` with that body. Mark the pick sent.
+3. **Dry-run (default).** Do not call Square inventory. Log `maurice_pick_inventory_dry_run` with that body.
 4. **Live**, only when `MAURICE_PICK_SEND_DRY_RUN=0` and `MAURICE_PICK_LIVE_DEDUCT=1`. `POST /v2/inventory/changes/batch-create` on the wholesale token with that same body, then log `maurice_pick_inventory_live`.
-5. Optional unpaid invoice, only when `createInvoice` is true on the payload or `MAURICE_PICK_CREATE_INVOICE=1`. This switch is **not** tied to the inventory gate. A dry-run Send can still book the invoice. That path is the existing `createUnpaidInvoice` helper: `SHARE_MANUALLY`, `automatic_payment_source: NONE`, customer `TQ8JFGXMZGTY8JNKCY1TV72618` unless `SQUARE_MAURICE_CUSTOMER_ID` is set. Square requires a backing order for an invoice, so this is the only `orders.create`. It does not take a payment. Default is **off**, so a normal Send does not call Orders or Invoices.
-6. Notify with the final total, short deltas, and `dryRun`. The Send JSON always includes them. A structured log line `maurice_pick_notify` is written. If `JORDAN_NOTIFY_WEBHOOK` is an http(s) URL, Send also POSTs that JSON. Twilio hosts are refused. A second Send is **Already sent** and does not deduct, log another adjustment, or notify again.
+5. Append priced lines to the week log (`priced_lines` on the pick row, plus a `maurice_pick_week_log` log line). This is the same role as `order_totals_log`: final quantities and catalog prices, including shorts at qty 0. Dry-run sends are logged too and marked `dryRun: true`.
+6. Notify Jordan with the final total, short deltas, and `dryRun`. There is **no Square invoice** on this call. A payload `createInvoice` field is ignored. `MAURICE_PICK_CREATE_INVOICE` is ignored. If `JORDAN_NOTIFY_WEBHOOK` is an http(s) URL, Send also POSTs that JSON. Twilio hosts are refused. A second Send is **Already sent** and does not deduct, append another log, or notify again.
+
+## Monday unpaid rollup
+
+`POST /api/pick/maurice-restock/week-invoice` with `BRIDGE_API_KEY`. Call it Monday morning. It is not part of the 2am prompt and it does not run Lafayette's house-account invoice.
+
+With an empty body, the window is the prior **Monday through Saturday** in America/Chicago. On Monday Sep 28 that is Sep 21–Sep 26. A later run the same week still uses that prior week, so the new Monday's pick is not included. Pass `{ "weekStart": "2026-09-21" }` to target a specific Monday; the end date is that Monday plus five days.
+
+The route sums **live** sent picks in that window (`notify.inventoryAdjusted === true`) by `sellableCatalogObjectId`. Dry-run sends are counted as `dryRunSkipped` and are not invoiced. It then creates **one** unpaid invoice on the wholesale account for customer Rachael's Cafe Maurice, `TQ8JFGXMZGTY8JNKCY1TV72618` unless `SQUARE_MAURICE_CUSTOMER_ID` is set. `SHARE_MANUALLY`, `automatic_payment_source: NONE`. Square prices the catalog variations. This app does not call Payments. Jordan can cancel, pay, or take a partial later in Square.
+
+A second call for the same week returns `alreadyInvoiced: true` and does not create another invoice. If the week has no live sends, the response is `invoiced: false` and Square is not called.
+
+```bash
+curl -sS -X POST "https://rachael-production-log.vercel.app/api/pick/maurice-restock/week-invoice" \
+  -H "Authorization: Bearer $BRIDGE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
 
 Square-Version stays **`2024-02-22`**.
 
 ## Storage
 
-Supabase table `public.pick_tokens`, using `SUPABASE_SERVICE_KEY` (the same server key as Batch Tracker). No Vercel KV or Blob client in this repo. The anon key is not used.
+Supabase, using `SUPABASE_SERVICE_KEY` (the same server key as Batch Tracker). No Vercel KV or Blob client in this repo. The anon key is not used.
 
-Apply [`supabase/pick_tokens.sql`](../supabase/pick_tokens.sql) once. If an older `pick_tokens` table was already created, run that file again; the new columns are `add column if not exists`.
+- `public.pick_tokens` holds each night's pick. After Send, `priced_lines` is the week-log row: variation id, name, qty ordered, qty sent, unit price cents, and line total cents.
+- `public.pick_week_invoices` holds one Monday rollup per week, keyed by the Monday date, so the invoice cannot be created twice.
+
+Apply [`supabase/pick_tokens.sql`](../supabase/pick_tokens.sql) once. If an older `pick_tokens` table was already created, run that file again; the new columns are `add column if not exists`, and `pick_week_invoices` is created if missing.
 
 Missing Supabase config → **503**. `PICK_STORE=memory` is a single-process local fallback and is ignored when `NODE_ENV=production` or `VERCEL=1`.
 
@@ -100,7 +122,6 @@ This is the call Claude makes after step 6, instead of step 7. It does not call 
   "PRINT_DAY": "Tue",
   "date": "2026-09-22",
   "estimatedTotal": "48.00",
-  "createInvoice": false,
   "lines": [
     {
       "sellableCatalogObjectId": "VARIATION_ID",
@@ -111,7 +132,7 @@ This is the call Claude makes after step 6, instead of step 7. It does not call 
 }
 ```
 
-`sellableCatalogObjectId` is a wholesale catalog **item variation** id. `name` is required. `qtyOrdered` is a positive number. `estimatedTotal` is dollars. `createInvoice` is optional; omit it or send `false` to skip the invoice. INV001–INV056 are rejected.
+`sellableCatalogObjectId` is a wholesale catalog **item variation** id. `name` is required. `qtyOrdered` is a positive number. `estimatedTotal` is dollars. A `createInvoice` field is accepted and ignored. Daily Send does not invoice. INV001–INV056 are rejected.
 
 Success:
 
@@ -181,15 +202,14 @@ Success and the idempotent replay are both **200**:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `BRIDGE_API_KEY` | Yes, for create | Same secret as `/api/square/*`. |
-| `SQUARE_WHOLESALE_TOKEN` | Yes, for send | Wholesale token. Fallback `SQUARE_TOKEN`. Dry-run still catalog-reads, so `ITEMS_READ` is required. Add `INVENTORY_WRITE` before flipping live. Add `INVOICES_WRITE`, `ORDERS_WRITE`, and `CUSTOMERS_READ` only if invoices are turned on. |
+| `BRIDGE_API_KEY` | Yes, for create and the Monday rollup | Same secret as `/api/square/*`. The phone Send route is not bridge-gated. |
+| `SQUARE_WHOLESALE_TOKEN` | Yes, for send and Monday | Wholesale token. Fallback `SQUARE_TOKEN`. Dry-run still catalog-reads, so `ITEMS_READ` is required. Add `INVENTORY_WRITE` before flipping live. Monday rollup needs `INVOICES_WRITE`, `ORDERS_WRITE`, and `CUSTOMERS_READ`. |
 | `NEXT_PUBLIC_SUPABASE_URL` | Yes, in production | Supabase project URL. |
 | `SUPABASE_SERVICE_KEY` | Yes, in production | Service role key. Server-only. |
 | `APP_BASE_URL` | No | Origin baked into the QR. Production default `https://rachael-production-log.vercel.app`. |
-| `SQUARE_MAURICE_CUSTOMER_ID` | No | Maurice as a **customer on the wholesale account** (Rachaels Cafe Maurice). Default `TQ8JFGXMZGTY8JNKCY1TV72618`. |
-| `MAURICE_PICK_SEND_DRY_RUN` | No | Default **on** when unset. Send logs the adjustment and does not call `inventory.batchChange`. Set to `0` only as half of the live flip. `1` forces dry-run even if live deduct is on. |
+| `SQUARE_MAURICE_CUSTOMER_ID` | No | Maurice as a **customer on the wholesale account** (Rachael's Cafe Maurice). Default `TQ8JFGXMZGTY8JNKCY1TV72618`. Used only by the Monday rollup. |
+| `MAURICE_PICK_SEND_DRY_RUN` | No | Default **on** when unset. Send logs the adjustment and does not call `inventory.batchChange`. Set to `0` only as half of the live flip. `1` forces dry-run even if live deduct is on. Dry-run sends are stored on the week log and skipped by the Monday invoice. |
 | `MAURICE_PICK_LIVE_DEDUCT` | No | Default **off**. Set to `1` together with `MAURICE_PICK_SEND_DRY_RUN=0` to deduct final quantities at `L6D106R4VNA72`. Either flag alone stays dry-run. |
-| `MAURICE_PICK_CREATE_INVOICE` | No | Set to `1` to book the unpaid invoice on every Send. Default off. A payload `createInvoice: true` turns it on for that night only. Separate from the inventory gate, so a dry-run Send can still invoice. |
 | `JORDAN_NOTIFY_WEBHOOK` | No | http(s) URL that receives the final total, shorts, and `dryRun`. Not Twilio. |
 
 The adjustment location is **not** taken from `SQUARE_WHOLESALE_LOCATION_ID`. Send always uses `L6D106R4VNA72`.
@@ -200,7 +220,7 @@ The adjustment location is **not** taken from `SQUARE_WHOLESALE_LOCATION_ID`. Se
 
 1. **Claude prompt, then the live flags.** Step 7 must stop deducting before `MAURICE_PICK_SEND_DRY_RUN=0` and `MAURICE_PICK_LIVE_DEDUCT=1`. Until both are set, Send cannot double-deduct with the old step 7, because Send does not call `batchChange`. The 2am job itself still can.
 2. **`pick_tokens` table** and `SUPABASE_SERVICE_KEY`.
-3. **Wholesale token** with `INVENTORY_WRITE` and `ITEMS_READ`. Invoice scopes only if `createInvoice` is on.
+3. **Wholesale token** with `ITEMS_READ` for Send. Add `INVENTORY_WRITE` before the live flip. The Monday invoice also needs `INVOICES_WRITE`, `ORDERS_WRITE`, and `CUSTOMERS_READ`.
 4. **Counting items.** INV001–INV056 stay on the 2am count. They are rejected here even if a sellable id's SKU is one of those codes.
 5. **Jordan notify.** With no webhook, the summary is still in the Send response, the server log, and the phone's Already sent screen.
 6. **`APP_BASE_URL`** if the public host is not the production default, so the PDF QR points at the right origin.

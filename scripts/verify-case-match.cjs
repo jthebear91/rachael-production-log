@@ -36,7 +36,12 @@ const ITEMS = [
   { variationId: 'var-crab-au', name: 'Crabmeat Au gratin (12)' },
   { variationId: 'var-shrimp-12', name: 'Stuffed Shrimp (12)' },
   { variationId: 'var-shrimp-heb', name: 'Stuffed Shrimp (12) HEBERTS' },
-  { variationId: 'var-jalapeno', name: 'Stuffed Jalapeno (12)' }
+  { variationId: 'var-jalapeno', name: 'Stuffed Jalapeno (12)' },
+  { variationId: 'var-chicken-breast', name: 'Chicken Breast' },
+  { variationId: 'var-chicken-raw', name: 'Chicken Breast (raw)' },
+  { variationId: 'var-chicken-gumbo', name: 'Chicken and Sausage Gumbo (6)' },
+  { variationId: 'var-chicken-cafe', name: 'Chicken and Sausage (Cafe)' },
+  { variationId: 'var-cfs', name: 'CFS' }
 ]
 
 function namesFor(title) {
@@ -119,10 +124,50 @@ function testSavedFinishItemPopulates() {
   // A non-empty fuzzy list is not rewritten just because a different mapping exists.
   const kept = withSavedMatch(ranked, { variationId: 'var-mashed', name: 'Mashed Potatoes' }, ITEMS)
   assert(kept.length === ranked.length && kept[0].name === 'Potato Salad', 'fuzzy hits are kept')
-  assert(initialCaseSelection(kept, { variationId: 'var-mashed', name: 'Mashed Potatoes' }).variationId === '', 'unlisted mapping is not pre-selected')
+  const sole = initialCaseSelection(kept, { variationId: 'var-mashed', name: 'Mashed Potatoes' })
+  assert(sole.variationId === 'var-potato-salad', 'the one real match is pre-selected')
+  assert(sole.name === 'Potato Salad', 'stale mapping name is not used')
+}
+
+function testPastChickenAlias() {
+  const titles = [
+    'past chicken',
+    'Past Chicken',
+    'PAST CHICKEN',
+    'pass chicken',
+    'Pass Chicken',
+    'past chicken TILT',
+    'past chicken TILT - 1 bucket',
+    'Pass Chicken - 2 buckets',
+    'pass chicken 1 BUCKETS',
+    '1 bucket of past chicken'
+  ]
+  const chickenNames = [
+    'Chicken Breast (raw)',
+    'Chicken and Sausage Gumbo (6)',
+    'Chicken and Sausage (Cafe)',
+    'CFS'
+  ]
+  for (const title of titles) {
+    const names = namesFor(title)
+    assert(names.length === 1 && names[0] === 'Chicken Breast', `${title} matched ${names.join(', ')}`)
+    for (const other of chickenNames) {
+      assert(!names.includes(other), `${title} also matched ${other}`)
+    }
+    const selected = initialCaseSelection(rankCaseMatches(title, ITEMS), null)
+    assert(selected.variationId === 'var-chicken-breast', `${title} did not pre-select Chicken Breast`)
+    assert(selected.name === 'Chicken Breast', `${title} pre-select name ${selected.name}`)
+  }
+
+  assert(!namesFor('Pass CFS').includes('Chicken Breast'), 'Pass CFS is not chicken breast')
+  assert(!namesFor('chicken salad').includes('Chicken Breast'), 'chicken salad is not an alias')
+  assert(!namesFor('Chicken and Sausage Gumbo (6)').includes('Chicken Breast'), 'gumbo title stays off chicken breast')
+  const gumbo = namesFor('Chicken and Sausage Gumbo (6)')
+  assert(gumbo[0] === 'Chicken and Sausage Gumbo (6)', `gumbo top ${gumbo[0]}`)
 }
 
 testPotatoSaladTitles()
 testNoiseDoesNotCollapseOtherSkus()
 testSavedFinishItemPopulates()
+testPastChickenAlias()
 console.log('case-match ok')

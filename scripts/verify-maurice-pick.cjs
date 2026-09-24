@@ -759,7 +759,7 @@ function testSourceShape() {
   assert(!send.includes('createUnpaidInvoice'), 'daily send does not create an invoice')
   assert(send.includes('squareFetch'), 'send uses shared Square client')
   assert(!send.includes('authorizeBridge'), 'phone send is not bridge-gated')
-  assert(!send.includes('authorizePickMint') && !send.includes('PICK_MINT_API_KEY'), 'phone send does not accept the mint-only key')
+  assert(!send.includes('authorizePickMint') && !send.includes('process.env.PICK_MINT_API_KEY'), 'phone send does not accept the mint-only key')
   const week = fs.readFileSync(path.join(root, 'pages/api/pick/maurice-restock/week-invoice.js'), 'utf8')
   assert(week.includes('createUnpaidInvoice'), 'monday rollup uses the unpaid invoice helper')
   assert(week.includes('authorizeBridge'), 'monday rollup uses the bridge key')

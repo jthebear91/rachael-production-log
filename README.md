@@ -16,7 +16,8 @@ Daily production logging app for Rachael's Wholesale LLC.
 | `SQUARE_MAURICE_LOCATION_ID` | Square location for Maurice cafe |
 | `SQUARE_RESTAURANT_TOKEN` | Legacy Maurice token (`account=restaurant` alias). Used if `SQUARE_MAURICE_TOKEN` is unset. |
 | `SQUARE_RESTAURANT_LOCATION_ID` | Legacy Maurice location. Used if `SQUARE_MAURICE_LOCATION_ID` is unset. |
-| `BRIDGE_API_KEY` | Shared secret for `/api/square/*` (GET reads and `POST /api/square/invoices/create`) and `POST /api/pick/maurice-restock/create`. Routes fail closed (503) if unset. |
+| `BRIDGE_API_KEY` | Shared secret for `/api/square/*` (GET reads and `POST /api/square/invoices/create`), `POST /api/pick/maurice-restock/week-invoice`, and `POST /api/pick/maurice-restock/create`. Routes fail closed (503) if unset. |
+| `PICK_MINT_API_KEY` | Mint-only secret for `POST /api/pick/maurice-restock/create` (`Authorization: Bearer`). Set this on Vercel Production for Claude's nightly pick. It does not authorize Send, inventory, invoices, or other bridge routes. Use a different value from `BRIDGE_API_KEY`. |
 | `SALES_DASHBOARD_PIN` | Shared PIN for the sales dashboard (`/dashboard`) and sales-sensitive APIs (`/api/square/sales`, `/payments`, `/orders`). **Do not PIN the whole app** — Daily Log stays public. Unset in local development allows sales access. Unset in production (`VERCEL=1` or `NODE_ENV=production`) blocks sales and shows “PIN not configured” on `/sales-login`. |
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase Project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase Publishable Key |

@@ -4,9 +4,10 @@ import { resolveAccount, squareFetch } from '../../../../lib/square-client.js'
 
 // The unguessable pick token is the capability. The phone that scans the
 // sheet does not have BRIDGE_API_KEY, so this route does not use that gate.
-// Create stays on the bridge key. Send adjusts wholesale inventory only
-// when live deduct is armed, appends priced lines to the week log, and
-// notifies Jordan. It does not create an invoice and does not call Payments.
+// PICK_MINT_API_KEY is not a credential here. Send adjusts wholesale
+// inventory only when live deduct is armed, appends priced lines to the
+// week log, and notifies Jordan. It does not create an invoice and does
+// not call Payments.
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store')

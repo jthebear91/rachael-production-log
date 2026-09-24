@@ -33,10 +33,11 @@ Step 7 — do not deduct inventory. Mint the pick QR instead.
 
 Do not call inventory.batchChange. Do not call orders.create. Do not call payments.create. Do not adjust INV001–INV056. Those counting items stay on the on-hand read only.
 
-After the sellable lines and estimatedTotal exist, mint a pick token:
+After the sellable lines and estimatedTotal exist, mint a pick token.
+Use PICK_MINT_API_KEY only. Do not call Send, week-invoice, inventory, or any other /api/square route with this key.
 
 POST https://rachael-production-log.vercel.app/api/pick/maurice-restock/create
-Authorization: Bearer <BRIDGE_API_KEY>
+Authorization: Bearer <PICK_MINT_API_KEY>
 Content-Type: application/json
 
 {
@@ -111,9 +112,30 @@ Apply [`supabase/pick_tokens.sql`](../supabase/pick_tokens.sql) once. If an olde
 
 Missing Supabase config → **503**. `PICK_STORE=memory` is a single-process local fallback and is ignored when `NODE_ENV=production` or `VERCEL=1`.
 
+## Mint-only key (`PICK_MINT_API_KEY`)
+
+Set `PICK_MINT_API_KEY` on **Vercel Production**. It must be a different secret from `BRIDGE_API_KEY`. Claude's nightly job uses this key only to POST the mint route and embed `qrUrl` on the PDF. Never use it for Send, inventory, invoices, or other bridge calls.
+
+**Route that accepts it**
+
+- `POST /api/pick/maurice-restock/create` — `Authorization: Bearer <PICK_MINT_API_KEY>` or `Authorization: Bearer <BRIDGE_API_KEY>` (the `x-bridge-key` header works the same way). Either key. This route stores the pick and returns `qrUrl`. It does not adjust Square inventory.
+
+**Routes that reject it**
+
+- `POST /api/pick/[token]/send` does not read API keys. The pick token is the capability for the phone. `PICK_MINT_API_KEY` is not a credential, and presenting it does not arm live deduct. Live deduct stays off until `MAURICE_PICK_SEND_DRY_RUN=0` and `MAURICE_PICK_LIVE_DEDUCT=1`.
+- `POST /api/pick/maurice-restock/week-invoice` accepts only `BRIDGE_API_KEY`.
+- `GET /api/square/inventory`, `POST /api/square/invoices/create`, and the rest of `/api/square/*` accept only `BRIDGE_API_KEY` (sales routes also accept the sales PIN cookie). With `BRIDGE_API_KEY` set, a mint key is **401**. If `BRIDGE_API_KEY` is unset, those routes stay **503**.
+
+```bash
+curl -sS -X POST "https://rachael-production-log.vercel.app/api/pick/maurice-restock/create" \
+  -H "Authorization: Bearer $PICK_MINT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"PRINT_DAY":"Tue","date":"2026-09-22","estimatedTotal":"48.00","lines":[{"sellableCatalogObjectId":"VARIATION_ID","name":"Stuffed shrimp","qtyOrdered":4}]}'
+```
+
 ## `POST /api/pick/maurice-restock/create`
 
-Auth: `BRIDGE_API_KEY` (`Authorization: Bearer …` or `x-bridge-key`). Missing key → **503**. Wrong key → **401**.
+Auth: `PICK_MINT_API_KEY` or `BRIDGE_API_KEY` (`Authorization: Bearer …` or `x-bridge-key`). If neither secret is set → **503**. Wrong key → **401**. `BRIDGE_API_KEY` alone still authorizes this route.
 
 This is the call Claude makes after step 6, instead of step 7. It does not call Square.
 
@@ -149,10 +171,12 @@ Success:
 
 ```bash
 curl -sS -X POST "https://rachael-production-log.vercel.app/api/pick/maurice-restock/create" \
-  -H "Authorization: Bearer YOUR_BRIDGE_API_KEY" \
+  -H "Authorization: Bearer $PICK_MINT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"PRINT_DAY":"Tue","date":"2026-09-22","estimatedTotal":"48.00","lines":[{"sellableCatalogObjectId":"VARIATION_ID","name":"Stuffed shrimp","qtyOrdered":4}]}'
 ```
+
+`Authorization: Bearer $BRIDGE_API_KEY` on this same POST still works. Do not send `$PICK_MINT_API_KEY` to Send, `week-invoice`, or `/api/square/*`.
 
 ## Sheet, QR image, and phone
 
@@ -202,7 +226,8 @@ Success and the idempotent replay are both **200**:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `BRIDGE_API_KEY` | Yes, for create and the Monday rollup | Same secret as `/api/square/*`. The phone Send route is not bridge-gated. |
+| `BRIDGE_API_KEY` | Yes, for create and the Monday rollup | Same secret as `/api/square/*`. Still accepted on create. The phone Send route is not bridge-gated. |
+| `PICK_MINT_API_KEY` | For Claude's mint call | Set on Vercel Production. Different value from `BRIDGE_API_KEY`. Authorizes only `POST /api/pick/maurice-restock/create`. Send, inventory, invoices, and other `/api/square/*` routes reject it. |
 | `SQUARE_WHOLESALE_TOKEN` | Yes, for send and Monday | Wholesale token. Fallback `SQUARE_TOKEN`. Dry-run still catalog-reads, so `ITEMS_READ` is required. Add `INVENTORY_WRITE` before flipping live. Monday rollup needs `INVOICES_WRITE`, `ORDERS_WRITE`, and `CUSTOMERS_READ`. |
 | `NEXT_PUBLIC_SUPABASE_URL` | Yes, in production | Supabase project URL. |
 | `SUPABASE_SERVICE_KEY` | Yes, in production | Service role key. Server-only. |

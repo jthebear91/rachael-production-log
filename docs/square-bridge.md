@@ -14,7 +14,7 @@ Base URL (production): `https://rachael-production-log.vercel.app`
 
 ## Auth
 
-Every `/api/square/*` route requires `BRIDGE_API_KEY`.
+Every `/api/square/*` route requires `BRIDGE_API_KEY`. `PICK_MINT_API_KEY` is not accepted here. That secret only authorizes `POST /api/pick/maurice-restock/create` (see [maurice-restock-pick-qr.md](maurice-restock-pick-qr.md)).
 
 Send either:
 

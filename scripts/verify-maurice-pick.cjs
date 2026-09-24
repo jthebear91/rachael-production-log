@@ -759,13 +759,25 @@ function testSourceShape() {
   assert(!send.includes('createUnpaidInvoice'), 'daily send does not create an invoice')
   assert(send.includes('squareFetch'), 'send uses shared Square client')
   assert(!send.includes('authorizeBridge'), 'phone send is not bridge-gated')
+  assert(!send.includes('authorizePickMint') && !send.includes('process.env.PICK_MINT_API_KEY'), 'phone send does not accept the mint-only key')
   const week = fs.readFileSync(path.join(root, 'pages/api/pick/maurice-restock/week-invoice.js'), 'utf8')
   assert(week.includes('createUnpaidInvoice'), 'monday rollup uses the unpaid invoice helper')
   assert(week.includes('authorizeBridge'), 'monday rollup uses the bridge key')
+  assert(!week.includes('authorizePickMint') && !week.includes('PICK_MINT_API_KEY'), 'monday rollup rejects the mint-only key')
   assert(!week.includes('SQUARE_LAFAYETTE'), 'monday rollup does not use the Lafayette account')
   const create = fs.readFileSync(path.join(root, 'pages/api/pick/maurice-restock/create.js'), 'utf8')
-  assert(create.includes('authorizeBridge'), 'create uses bridge auth')
+  assert(create.includes('authorizePickMint'), 'create accepts the mint-only key')
+  assert(!create.includes('authorizeBridge'), 'create does not use the full bridge gate')
   assert(create.includes('createMauricePick'), 'create handler')
+  const inventory = fs.readFileSync(path.join(root, 'pages/api/square/inventory.js'), 'utf8')
+  const invoiceCreate = fs.readFileSync(path.join(root, 'pages/api/square/invoices/create.js'), 'utf8')
+  assert(inventory.includes('withBridgeGet') && !inventory.includes('PICK_MINT_API_KEY'), 'inventory stays on the bridge key')
+  assert(invoiceCreate.includes('withBridgePost') && !invoiceCreate.includes('PICK_MINT_API_KEY'), 'invoice create stays on the bridge key')
+  const authSrc = fs.readFileSync(path.join(root, 'lib/bridge-auth.js'), 'utf8')
+  const bridgeFn = authSrc.slice(authSrc.indexOf('export function authorizeBridge'), authSrc.indexOf('export function authorizePickMint'))
+  const isBridgeFn = authSrc.slice(authSrc.indexOf('export function isBridgeAuthorized'), authSrc.indexOf('export function authorizeBridge'))
+  assert(!bridgeFn.includes('PICK_MINT_API_KEY'), 'full bridge auth ignores the mint key')
+  assert(!isBridgeFn.includes('PICK_MINT_API_KEY'), 'sales bridge check ignores the mint key')
   const page = fs.readFileSync(path.join(root, 'pages/pick/[token].js'), 'utf8')
   assert(page.includes('Already sent'), 'phone says already sent')
   assert(page.includes('Dry run. Wholesale inventory was not changed.'), 'phone names a dry-run send')
@@ -779,8 +791,99 @@ function testSourceShape() {
   assert(sql.includes('pick_week_invoices') && sql.includes('priced_lines'), 'sql stores the week log and rollup')
 }
 
+function captureRes() {
+  return {
+    statusCode: 0,
+    body: null,
+    status(code) {
+      this.statusCode = code
+      return this
+    },
+    json(body) {
+      this.body = body
+      return this
+    },
+    setHeader() {}
+  }
+}
+
+async function testPickMintAuth() {
+  const { authorizeBridge, authorizePickMint, isBridgeAuthorized, withBridgeGet, withBridgePost } = await import('../lib/bridge-auth.js')
+  const prevBridge = process.env.BRIDGE_API_KEY
+  const prevMint = process.env.PICK_MINT_API_KEY
+  const bridge = 'bridge-key-test-value'
+  const mint = 'mint-key-test-value'
+  const bearer = key => ({ method: 'POST', headers: { authorization: `Bearer ${key}` } })
+  const alt = key => ({ method: 'GET', headers: { 'x-bridge-key': key } })
+
+  try {
+    process.env.BRIDGE_API_KEY = bridge
+    process.env.PICK_MINT_API_KEY = mint
+
+    assert(authorizePickMint(bearer(mint), captureRes()) === true, 'mint key opens create')
+    assert(authorizePickMint(bearer(bridge), captureRes()) === true, 'bridge key still opens create')
+    assert(authorizePickMint(alt(mint), captureRes()) === true, 'mint key via x-bridge-key opens create')
+
+    const bad = captureRes()
+    assert(authorizePickMint(bearer('nope'), bad) === false, 'wrong key rejected on mint')
+    assert(bad.statusCode === 401 && bad.body.error === 'Unauthorized', 'wrong mint key is 401')
+
+    const bridgeReject = captureRes()
+    assert(authorizeBridge(bearer(mint), bridgeReject) === false, 'mint key rejected by bridge auth')
+    assert(bridgeReject.statusCode === 401, 'mint key on bridge is 401')
+    assert(isBridgeAuthorized(bearer(mint)) === false, 'mint key is not bridge-authorized')
+    assert(isBridgeAuthorized(bearer(bridge)) === true, 'bridge key is still bridge-authorized')
+    assert(authorizeBridge(bearer(bridge), captureRes()) === true, 'bridge key still authorized')
+
+    const post = withBridgePost(async (_req, res) => {
+      res.status(200).json({ wrote: true })
+    })
+    const postRes = captureRes()
+    await post(bearer(mint), postRes)
+    assert(postRes.statusCode === 401 && postRes.body.wrote !== true, 'bridge POST rejects mint key')
+    const postOk = captureRes()
+    await post(bearer(bridge), postOk)
+    assert(postOk.statusCode === 200 && postOk.body.wrote === true, 'bridge POST still accepts the bridge key')
+
+    const get = withBridgeGet(async (_req, res) => {
+      res.status(200).json({ read: true })
+    })
+    const getRes = captureRes()
+    await get({ method: 'GET', headers: { authorization: `Bearer ${mint}` } }, getRes)
+    assert(getRes.statusCode === 401 && getRes.body.read !== true, 'bridge GET rejects mint key')
+
+    delete process.env.BRIDGE_API_KEY
+    delete process.env.PICK_MINT_API_KEY
+    const missing = captureRes()
+    assert(authorizePickMint(bearer(mint), missing) === false, 'unset keys fail closed on mint')
+    assert(missing.statusCode === 503 && missing.body.error === 'Bridge is not configured', 'unset mint auth is 503')
+    const missingBridge = captureRes()
+    assert(authorizeBridge(bearer(bridge), missingBridge) === false, 'unset bridge fails closed')
+    assert(missingBridge.statusCode === 503, 'unset bridge is 503')
+
+    process.env.PICK_MINT_API_KEY = mint
+    assert(authorizePickMint(bearer(mint), captureRes()) === true, 'mint key alone opens create')
+    const onlyMintOnBridge = captureRes()
+    assert(authorizeBridge(bearer(mint), onlyMintOnBridge) === false, 'mint key alone does not open bridge')
+    assert(onlyMintOnBridge.statusCode === 503, 'bridge stays fail-closed without BRIDGE_API_KEY')
+
+    process.env.BRIDGE_API_KEY = bridge
+    delete process.env.PICK_MINT_API_KEY
+    assert(authorizePickMint(bearer(bridge), captureRes()) === true, 'bridge key alone still opens create')
+    const noMint = captureRes()
+    assert(authorizePickMint(bearer(mint), noMint) === false, 'absent mint key is not accepted')
+    assert(noMint.statusCode === 401, 'unknown key is 401 when bridge is configured')
+  } finally {
+    if (prevBridge === undefined) delete process.env.BRIDGE_API_KEY
+    else process.env.BRIDGE_API_KEY = prevBridge
+    if (prevMint === undefined) delete process.env.PICK_MINT_API_KEY
+    else process.env.PICK_MINT_API_KEY = prevMint
+  }
+}
+
 async function main() {
   const { createUnpaidInvoice } = await import('../lib/square-invoices.js')
+  await testPickMintAuth()
   await testValidation()
   await testSupabaseStore()
   await testCreateSend(createUnpaidInvoice)

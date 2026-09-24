@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { HIDDEN_CATEGORIES } from '../lib/hidden-categories'
+import { initialCaseSelection } from '../lib/case-match'
 
 export default function App() {
   // ── SCREEN ─────────────────────────────────────
@@ -125,11 +126,11 @@ export default function App() {
       .then(data => {
         const matches = Array.isArray(data.matches) ? data.matches : []
         setCaseMatches(matches)
-        const lastUsedValid = data.lastUsed && matches.some(m => m.variationId === data.lastUsed.variationId)
+        const selected = initialCaseSelection(matches, data.lastUsed)
         setCaseSplits([{
           rowId: 0,
-          variationId: lastUsedValid ? data.lastUsed.variationId : '',
-          name: lastUsedValid ? data.lastUsed.name : '',
+          variationId: selected.variationId,
+          name: selected.name,
           cases: '',
           search: ''
         }])

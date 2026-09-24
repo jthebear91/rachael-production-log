@@ -11,45 +11,7 @@
 // hidden from the Daily Log's category row.
 import { fetchCatalog } from '../../lib/square-catalog'
 import { HIDDEN_CATEGORIES } from '../../lib/hidden-categories'
-
-const STOPWORDS = new Set(['of', 'and', 'the', 'a', 'an', 'with', 'for'])
-
-// Light plural stemming so "jalapenos" (Todoist) and "jalapeno" (Square)
-// count as the same word — without this, singular/plural mismatches
-// between how a batch is named in Todoist vs. Square silently hid the
-// correct match.
-function stem(w) {
-  if (w.length > 4 && w.endsWith('es')) return w.slice(0, -2)
-  if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) return w.slice(0, -1)
-  return w
-}
-
-function words(name) {
-  return (name || '')
-    // Strip accents (jalapeño → jalapeno) BEFORE dropping non-letters —
-    // otherwise an accented character gets replaced with a space and
-    // splits the word in two (jalapeño → "jalape" + "os"), silently
-    // hiding the item from every match.
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w && !STOPWORDS.has(w))
-    .map(stem)
-}
-
-// Counts shared words, but requires a real amount of overlap before it
-// counts as a match at all — a single common word like "base" or "corn"
-// matching "Chicken Base" or "Corn Starch" isn't a real match, it's just
-// noise. A 1-word item name (like "gumbo") needs that one word to match;
-// anything longer needs at least half its words to match, and at least 2.
-function scoreMatch(itemWords, catalogWords) {
-  const catSet = new Set(catalogWords)
-  let shared = 0
-  itemWords.forEach(w => { if (catSet.has(w)) shared++ })
-  const threshold = itemWords.length <= 1 ? 1 : Math.max(2, Math.ceil(itemWords.length / 2))
-  return shared >= threshold ? shared : 0
-}
+import { rankCaseMatches, withSavedMatch } from '../../lib/case-match'
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).end()
@@ -74,14 +36,7 @@ export default async function handler(req, res) {
     // Keep an item only if at least one of its categories is NOT hidden.
     const visibleItems = items.filter(i => (i.categoryIds || []).some(id => !hiddenIds.has(id)))
 
-    const itemWords = words(itemName)
-
-    const scored = visibleItems
-      .map(i => ({ ...i, score: scoreMatch(itemWords, words(i.name)) }))
-      .filter(i => i.score > 0)
-      .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
-      .slice(0, 8)
-      .map(({ variationId, name }) => ({ variationId, name }))
+    let matches = rankCaseMatches(itemName, visibleItems)
 
     let lastUsed = null
     try {
@@ -99,7 +54,9 @@ export default async function handler(req, res) {
       // matches list still works fine without it.
     }
 
-    res.status(200).json({ matches: scored, lastUsed })
+    matches = withSavedMatch(matches, lastUsed, visibleItems)
+
+    res.status(200).json({ matches, lastUsed })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

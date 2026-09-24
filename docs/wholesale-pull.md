@@ -16,9 +16,9 @@ Wholesale location id: `L6D106R4VNA72`
 
 Todoist task, priority **p1** (API priority `4`), inserted at the **top** of the leftmost Takeout column:
 
-`PULL · {account} · {invoice number or order id}`
+`PULL · {account} · {kind}`
 
-The description is the line list (qty and Square catalog name), a Square Dashboard link, and a `square-pull-key:` line. Prices and SKUs are not copied. A duplicate Square event for the same order or invoice updates nothing.
+House-account receipts use kind `house account`. Unpaid invoices use the invoice number. The title never includes `$`, other currency symbols, or a formatted amount such as `$2,568`. A total may stay in the Todoist description or in Square. The description is the line list (qty and Square catalog name), a Square Dashboard link, and a `square-pull-key:` line. Prices and SKUs are not copied onto the pick list. A duplicate Square event for the same order or invoice updates nothing.
 
 The pick-list PDF has the account, Chicago date, reference, and the same qty + name lines. It is not a signature invoice.
 

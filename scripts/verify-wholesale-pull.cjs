@@ -9,6 +9,7 @@ const {
   PRACTICE_HEBERTS_MAURICE,
   TAKEOUT_API_PRIORITY,
   assertPullSquareRead,
+  buildTaskTitle,
   formatQty,
   handlePullSheets,
   handleReplay,
@@ -269,6 +270,43 @@ function testOrderKeys() {
   assert(TAKEOUT_API_PRIORITY === 4, 'p1 is api priority 4')
 }
 
+function testTakeoutTitlesOmitMoney() {
+  assert(
+    buildTaskTitle({ account: 'Heberts Maurice', kind: 'house account $2,568' }) === 'PULL · Heberts Maurice · house account',
+    'strips $2,568 from the kind'
+  )
+  assert(
+    buildTaskTitle({ account: 'Heberts Maurice $2,568.00', reference: 'house account' }) === 'PULL · Heberts Maurice · house account',
+    'strips money from the account'
+  )
+  assert(
+    buildTaskTitle({ account: "Hebert's Maurice", kind: '1042' }) === "PULL · Hebert's Maurice · 1042",
+    'invoice number stays'
+  )
+  assert(
+    buildTaskTitle({ account: 'Heberts Maurice', kind: '$2,568' }) === 'PULL · Heberts Maurice · order',
+    'money-only kind falls back'
+  )
+  assert(
+    buildTaskTitle({ account: 'Cafe', kind: 'USD 2,568' }) === 'PULL · Cafe · order',
+    'currency code amount is omitted'
+  )
+  assert(
+    buildTaskTitle({ account: 'Cafe', kind: '€12.50' }) === 'PULL · Cafe · order',
+    'euro amount is omitted'
+  )
+  const samples = [
+    buildTaskTitle({ account: 'Heberts Maurice', kind: 'house account $2,568' }),
+    buildTaskTitle({ account: 'Heberts Maurice', kind: 'house account 2,568' }),
+    buildTaskTitle({ account: "Hebert's $10 Maurice", kind: 'invoice' })
+  ]
+  for (const title of samples) {
+    assert(!/[$€£¥₩₹₱]/.test(title), title)
+    assert(!/\d{1,3}(?:,\d{3})+/.test(title), title)
+    assert(title.startsWith('PULL · '), title)
+  }
+}
+
 function testSquareGuard() {
   assertPullSquareRead('GET', '/payments/PAY1')
   assertPullSquareRead('GET', '/orders/ORDER1')
@@ -311,6 +349,7 @@ async function testUnpaidInvoiceCreatesTakeoutTask() {
   assert(body.order_key === 'a0' && body.order_key < 'a1', body.order_key)
   assert(body.child_order === 0, `child_order ${body.child_order}`)
   assert(body.content === "PULL · Hebert's Maurice · 1042", body.content)
+  assert(!/[$€£¥₩₹₱]/.test(body.content), 'invoice title has no currency symbol')
   assert(body.description.includes('2  Stuffed Shrimp'), 'shrimp line')
   assert(body.description.includes('1  Seafood Gumbo (Quart)'), body.description)
   assert(body.description.includes('square-pull-key: order:ORDER_HEBERT'), 'idempotency key')
@@ -454,6 +493,8 @@ async function testHouseAccountOrderAndAllCompleted() {
   }, squareWorld)
   assert(created.json.created === true, JSON.stringify(created.json))
   assert(todoist.created[0].priority === 4, 'house account is p1')
+  assert(todoist.created[0].content === "PULL · Hebert's Maurice · house account", todoist.created[0].content)
+  assert(!todoist.created[0].content.includes('$'), 'house account title has no dollars')
 
   const cardStore = memoryStore()
   const cardTodoist = todoistFake()
@@ -612,6 +653,7 @@ function testSourceShape() {
 
 async function main() {
   testOrderKeys()
+  testTakeoutTitlesOmitMoney()
   testSquareGuard()
   await testUnpaidInvoiceCreatesTakeoutTask()
   await testSkipsAndFailClosed()

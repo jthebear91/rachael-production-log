@@ -14,7 +14,7 @@ Base URL (production): `https://rachael-production-log.vercel.app`
 
 ## Auth
 
-Every `/api/square/*` route requires `BRIDGE_API_KEY`. `PICK_MINT_API_KEY` is not accepted here. That secret only authorizes `POST /api/pick/maurice-restock/create` (see [maurice-restock-pick-qr.md](maurice-restock-pick-qr.md)).
+Every `/api/square/*` route requires `BRIDGE_API_KEY`, except `POST /api/square/wholesale-pull/webhook`. That webhook is signed with `SQUARE_WEBHOOK_SIGNATURE_KEY` (Square cannot send the bridge key). It creates Todoist **Takeout** pull tasks and pick-list PDFs. It does not charge cards. See [wholesale-pull.md](wholesale-pull.md). `PICK_MINT_API_KEY` is not accepted on bridge routes. That secret only authorizes `POST /api/pick/maurice-restock/create` (see [maurice-restock-pick-qr.md](maurice-restock-pick-qr.md)).
 
 Send either:
 

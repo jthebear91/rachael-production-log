@@ -122,17 +122,20 @@ The server stores the PDF. Vercel cannot see the office printer. The poll still 
 
 Run the poll on the wholesale Mac: user `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`. The Mac network name may show as `Trey-s-A25`. That is the network name only. Do not run this script on the Mac mini.
 
-`WHOLESALE_PULL_PRINTER` defaults to `Brother_HL_L3280CDW_series` (Brother HL-L3280CDW). When CUPS is armed, that queue name is the only target. Device URI: `dnssd://Brother%20HL-L3280CDW%20series._ipps._tcp.local./?uuid=e3248000-80ce-11db-8000-94ddf83ac040`
+Default:
+
+`WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series`
+
+That queue is the Brother HL-L3280CDW. When CUPS is armed, it is the only wholesale target. Device URI: `dnssd://Brother%20HL-L3280CDW%20series._ipps._tcp.local./?uuid=e3248000-80ce-11db-8000-94ddf83ac040`
+
+MFC-L5915DW is Maurice-only and must never be used for wholesale.
 
 ```bash
-# folder drop, then the default queue, on the wholesale Mac
+WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series
 BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
-
-# folder drop only
-WHOLESALE_PULL_PRINTER= BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
 ```
 
-An empty `WHOLESALE_PULL_PRINTER` skips CUPS and still writes the PDF. The default sends the saved file to `Brother_HL_L3280CDW_series` only when the user and machine id match the wholesale Mac. Wholesale must never print to the Mac mini queue `Brother_MFC_L5915DW_series` (Maurice cafe). The script exits instead of sending a job there. This script does not install a LaunchAgent and does not call the Maurice mint handoff.
+An empty `WHOLESALE_PULL_PRINTER` skips CUPS and still writes the PDF. The default sends the saved file to `Brother_HL_L3280CDW_series` only when the user and machine id match the wholesale Mac. The script exits instead of sending a job to any other queue. This script does not install a LaunchAgent and does not call the Maurice mint handoff.
 
 `GET /api/wholesale-pull/sheets` lists unprinted pulls. `GET /api/wholesale-pull/sheets?format=pdf&key=order:…` downloads one. `POST /api/wholesale-pull/sheets` with `{ "key": "order:…" }` marks it printed. All three require `BRIDGE_API_KEY`.
 
@@ -159,7 +162,7 @@ An empty `WHOLESALE_PULL_PRINTER` skips CUPS and still writes the PDF. The defau
 2. **Token scopes** (read only). The wholesale token needs `INVOICES_READ`, `ORDERS_READ`, `PAYMENTS_READ`, `CUSTOMERS_READ`, and `ITEMS_READ`. It must not be used to charge cards. This feature never calls Payments create or `inventory.batchChange`.
 3. **Supabase SQL** `supabase/wholesale_pulls.sql` has to be applied once or PDFs are not queued for the Mac.
 4. **Feature flag** stays off until the three items above are done. Then set `WHOLESALE_PULL_ENABLED=1` and redeploy.
-5. **CUPS is not launched from this repo.** Folder drop still works. `WHOLESALE_PULL_PRINTER` defaults to `Brother_HL_L3280CDW_series` (Brother HL-L3280CDW) on the wholesale Mac (user `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`). The network name may be `Trey-s-A25`; that is not the printer. Never print wholesale to `Brother_MFC_L5915DW_series` on the Mac mini. Do not install a LaunchAgent from this change.
+5. **CUPS is not launched from this repo.** Folder drop still works. Default is `WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series` (Brother HL-L3280CDW) on the wholesale Mac (user `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`). The network name may be `Trey-s-A25`; that is not the printer. When CUPS is armed, that queue is the only wholesale target. MFC-L5915DW is Maurice-only and must never be used for wholesale. Do not install a LaunchAgent from this change.
 6. **Merge** of this PR to `main` has not happened. Production does not serve the WHOLESALE banner until that ships.
 7. **Hebert's practice task** waits on Jordan. Replay with `apply: false` first. `--apply` creates the Takeout task and still does not print.
 8. **House-account shape.** If Hebert's receipt is a card tender rather than EXTERNAL/OTHER, the webhook skips it until `WHOLESALE_PULL_ALL_COMPLETED=1` or a replay with `--force`. Confirm on the dry run before turning the flag on.

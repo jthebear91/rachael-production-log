@@ -12,11 +12,12 @@
 # Folder drop (always, including when CUPS is skipped):
 #   ~/Documents/Wholesale Ordering/pull-sheets/
 #
-# Default CUPS queue (exact name). Model: Brother HL-L3280CDW.
-#   WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series
+# Default CUPS queue (exact). Model: Brother HL-L3280CDW.
+# WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series
+# When CUPS is armed, that queue is the only wholesale target.
 # Device URI: dnssd://Brother%20HL-L3280CDW%20series._ipps._tcp.local./?uuid=e3248000-80ce-11db-8000-94ddf83ac040
 # Set WHOLESALE_PULL_PRINTER to empty for folder-drop only.
-# Never send wholesale to the Maurice cafe queue Brother_MFC_L5915DW_series.
+# MFC-L5915DW is Maurice-only and must never be used for wholesale.
 #
 #   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh --dry-run
 #   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
@@ -54,7 +55,6 @@ key = os.environ["BRIDGE_API_KEY"]
 WHOLESALE_QUEUE = "Brother_HL_L3280CDW_series"
 WHOLESALE_USER = "rachaelsseafood"
 WHOLESALE_MACHINE_ID = "1c85823c-2c30-4ffb-b905-0241b4daebfe"
-MAURICE_CAFE_QUEUE = "Brother_MFC_L5915DW_series"
 # Unset defaults to the wholesale queue. An explicit empty value is folder-drop only.
 if "WHOLESALE_PULL_PRINTER" not in os.environ:
     printer = WHOLESALE_QUEUE
@@ -67,16 +67,17 @@ on_wholesale_mac = (
 
 if printer:
     folded = printer.lower()
-    if printer == MAURICE_CAFE_QUEUE or "mfc_l5915" in folded or "mfc-l5915" in folded:
+    if "mfc-l5915" in folded or "mfc_l5915" in folded:
         print(
-            "Refusing Maurice cafe queue Brother_MFC_L5915DW_series. "
-            "Wholesale CUPS target is Brother_HL_L3280CDW_series.",
+            "MFC-L5915DW is Maurice-only and must never be used for wholesale. "
+            f"Wholesale CUPS target is {WHOLESALE_QUEUE}.",
             file=sys.stderr,
         )
         sys.exit(1)
     if printer != WHOLESALE_QUEUE:
         print(
-            f"WHOLESALE_PULL_PRINTER must be {WHOLESALE_QUEUE}, or empty for folder-drop only.",
+            f"When CUPS is armed, WHOLESALE_PULL_PRINTER must be {WHOLESALE_QUEUE}. "
+            "Leave it empty for folder-drop only.",
             file=sys.stderr,
         )
         sys.exit(1)

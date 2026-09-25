@@ -4,9 +4,11 @@ const fs = require('fs')
 const path = require('path')
 const { chicagoISODate } = require('../lib/chicago-time')
 const { buildPickListPdf } = require('../lib/pick-list-pdf')
+const { buildSignatureInvoicePdf } = require('../lib/signature-invoice-pdf')
 const { HEBERTS_PUBLIC_NAME } = require('../lib/public-label')
 const { orderKeyBefore } = require('../lib/todoist-order-key')
 const { squareSignature } = require('../lib/square-webhook')
+const { todoistSignature } = require('../lib/todoist-webhook')
 const {
   PACKAGE_PROJECT_ID,
   PRACTICE_HEBERTS_MAURICE,
@@ -16,13 +18,15 @@ const {
   formatQty,
   handlePullSheets,
   handleReplay,
-  handleSquareWebhook
+  handleSquareWebhook,
+  handleTodoistWebhook
 } = require('../lib/wholesale-pull')
 
 const LOCATION = 'L6D106R4VNA72'
 const TAKEOUT = '6cv69FrQF2QcqVqw'
 const NOTIFICATION_URL = 'https://rachael-production-log.vercel.app/api/square/wholesale-pull/webhook'
 const SIGNING_KEY = 'test-key'
+const TODOIST_SECRET = 'todoist-whsec-test'
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg)
@@ -38,6 +42,7 @@ function baseEnv(extra = {}) {
     SQUARE_WHOLESALE_LOCATION_ID: LOCATION,
     TODOIST_TOKEN: 'todoist-test',
     TODOIST_TAKEOUT_PROJECT_ID: TAKEOUT,
+    TODOIST_WEBHOOK_SECRET: TODOIST_SECRET,
     ...extra
   }
 }
@@ -147,6 +152,28 @@ function memoryStore() {
       if (row.status !== 'ready') return { notReady: true }
       row.status = 'printed'
       row.printed_at = now.toISOString()
+      return row
+    },
+    async findByTodoistTaskId(taskId) {
+      return rows.find(existing => existing.todoist_task_id === String(taskId)) || null
+    },
+    async queueSignature(key, patch) {
+      const row = rows.find(existing => existing.idempotency_key === key)
+      if (!row) return null
+      if (row.signature_status || row.signature_printed_at) return { duplicate: true, row }
+      Object.assign(row, patch)
+      return { duplicate: false, row }
+    },
+    async listSignaturePending() {
+      return rows.filter(row => row.signature_status === 'ready')
+    },
+    async markSignaturePrinted(key, now) {
+      const row = rows.find(existing => existing.idempotency_key === key)
+      if (!row) return null
+      if (row.signature_status === 'printed' || row.signature_printed_at) return row
+      if (row.signature_status !== 'ready') return { notReady: true }
+      row.signature_status = 'printed'
+      row.signature_printed_at = now.toISOString()
       return row
     }
   }
@@ -737,6 +764,324 @@ async function testTakeoutDueFollowsChicagoMidnight() {
   assert(new Date('2026-01-15T05:30:00.000Z').toISOString().slice(0, 10) === '2026-01-15', 'utc date is the next day')
 }
 
+function signedTodoist(body, key = TODOIST_SECRET) {
+  const raw = JSON.stringify(body)
+  return {
+    raw,
+    signature: todoistSignature({ key, rawBody: raw })
+  }
+}
+
+function completedEvent(taskId, extra = {}) {
+  return {
+    event_name: 'item:completed',
+    event_data: {
+      id: taskId,
+      project_id: TAKEOUT,
+      content: "PULL · Hebert's Maurice · 1042",
+      description: '',
+      ...extra
+    }
+  }
+}
+
+async function postComplete(env, store, event, squareWorld) {
+  const { raw, signature } = signedTodoist(event)
+  return handleTodoistWebhook({
+    rawBody: raw,
+    signature,
+    env,
+    store,
+    squareFetch: squareWorld ? squareFetchFor(squareWorld) : undefined,
+    now: new Date('2026-09-25T18:00:00.000Z')
+  })
+}
+
+function testSignaturePdfShape() {
+  const invoice = buildSignatureInvoicePdf({
+    account: "Hebert's Specialty Meats (A Bears)",
+    dateLabel: 'Sep 25, 2026',
+    reference: '1042',
+    documentKind: 'invoice',
+    lines: [
+      { qty: '2', name: 'Stuffed Shrimp (A Bears)', unitAmount: 1299, lineAmount: 2598, currency: 'USD' },
+      { qty: '1', name: 'Seafood Gumbo (Quart)' }
+    ],
+    totals: {
+      currency: 'USD',
+      subtotal: 2598,
+      tax: 200,
+      discount: 50,
+      total: 2748,
+      documentKind: 'invoice'
+    }
+  }).toString('latin1')
+  assert(invoice.startsWith('%PDF'), 'signature pdf header')
+  assert(invoice.includes('INVOICE'), 'invoice banner')
+  assert(invoice.includes('0.11 0.16 0.33 rg'), 'invoice banner color')
+  assert(!invoice.includes('0.10 0.32 0.24'), 'not the pick-list green')
+  assert(!invoice.includes('WHOLESALE'), 'signature pdf has no wholesale banner')
+  assert(!invoice.includes('PICK LIST'), 'signature pdf is not a pick list')
+  assert(invoice.includes(HEBERTS_PUBLIC_NAME), invoice)
+  assert(invoice.includes('Stuffed Shrimp'), 'nickname stripped from the item, name kept')
+  assert(!/a bears/i.test(invoice), 'speech nickname stays off the signature pdf')
+  assert(invoice.includes('$12.99'), invoice)
+  assert(invoice.includes('$25.98'), invoice)
+  assert(invoice.includes('Tax') && invoice.includes('$2.00'), 'tax')
+  assert(invoice.includes('Discount') && invoice.includes('-$0.50'), 'discount')
+  assert(invoice.includes('Total') && invoice.includes('$27.48'), 'total')
+  assert(invoice.includes('SIGNATURE'), 'signature line')
+  assert(invoice.includes('Sign and date'), 'signature caption')
+  assert(!invoice.includes('House account receipt'), 'invoice is not a house receipt')
+
+  const receipt = buildSignatureInvoicePdf({
+    account: HEBERTS_PUBLIC_NAME,
+    dateLabel: 'Sep 25, 2026',
+    reference: 'house account',
+    documentKind: 'house_account',
+    lines: [{ qty: '2', name: 'Stuffed Shrimp', unitAmount: 1299, lineAmount: 2598, currency: 'USD' }],
+    totals: { currency: 'USD', subtotal: 2598, total: 2598, documentKind: 'house_account' }
+  }).toString('latin1')
+  assert(receipt.includes('SIGNATURE'), 'house account banner')
+  assert(receipt.includes('House account receipt'), receipt)
+  assert(receipt.includes('0.40 0.12 0.12 rg'), 'receipt banner color')
+  assert(!receipt.includes('INVOICE'), 'house receipt is not labeled invoice')
+  assert(!receipt.includes('WHOLESALE'), 'house receipt has no wholesale banner')
+  assert(receipt.includes('$25.98'), 'house receipt is priced')
+  assert(receipt.includes(HEBERTS_PUBLIC_NAME), 'house receipt account')
+}
+
+async function testCompleteQueuesSignatureInvoice() {
+  const env = baseEnv()
+  const store = memoryStore()
+  const todoist = todoistFake()
+  const squareWorld = world()
+  const created = await postEvent(env, store, todoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, squareWorld)
+  assert(created.json.created === true, JSON.stringify(created.json))
+  const row = store.rows[0]
+  assert(row.todoist_task_id === 'task-1', row.todoist_task_id)
+  assert(row.totals && row.totals.priced === true, 'prices captured on the pull')
+  assert(row.totals.documentKind === 'invoice', row.totals.documentKind)
+  assert(row.totals.total === 2598, `total ${row.totals.total}`)
+  assert(row.signature_status == null, 'create does not queue a signature')
+  assert(!todoist.created[0].description.includes('1299'), 'task description still has no price')
+  const pick = Buffer.from(row.pdf_base64, 'base64').toString('latin1')
+  assert(pick.includes('WHOLESALE'), 'pick list banner unchanged')
+  assert(!pick.includes('$') && !pick.includes('12.99'), 'pick list still has no prices')
+
+  const callsAfterCreate = squareWorld.squareCalls
+  const key = row.idempotency_key
+  const before = await handlePullSheets({
+    method: 'GET',
+    query: { queue: 'signature' },
+    env: {},
+    store
+  })
+  assert(before.json.data.length === 0, 'nothing to print before complete')
+  const earlyFile = await handlePullSheets({
+    method: 'GET',
+    query: { format: 'pdf', queue: 'signature', key },
+    env: {},
+    store
+  })
+  assert(earlyFile.status === 404, 'signature download is not the pick list')
+  const tooSoon = await handlePullSheets({
+    method: 'POST',
+    body: { key, queue: 'signature' },
+    env: {},
+    store
+  })
+  assert(tooSoon.status === 409, `signature mark before queue ${tooSoon.status}`)
+
+  const first = await postComplete(env, store, completedEvent('task-1'), squareWorld)
+  assert(first.status === 200 && first.json.queued === true, JSON.stringify(first.json))
+  assert(first.json.duplicate === false, 'first complete queues')
+  assert(first.json.documentKind === 'invoice', first.json.documentKind)
+  assert(squareWorld.squareCalls === callsAfterCreate, 'stored prices skip another Square read')
+  assert(row.signature_status === 'ready', row.signature_status)
+  assert(row.status === 'ready', 'pick list status stays ready')
+  const signature = Buffer.from(row.signature_pdf_base64, 'base64').toString('latin1')
+  assert(signature.includes('INVOICE') && signature.includes('$12.99') && signature.includes('SIGNATURE'), signature.slice(0, 500))
+  assert(!signature.includes('WHOLESALE'), 'queued pdf is not the pick list')
+  assert(!/a bears/i.test(signature), 'queued pdf has no speech nickname')
+
+  const listed = await handlePullSheets({ method: 'GET', query: { queue: 'signature' }, env: {}, store })
+  assert(listed.json.data.length === 1 && listed.json.data[0].queue === 'signature', JSON.stringify(listed.json))
+  const file = await handlePullSheets({
+    method: 'GET',
+    query: { format: 'pdf', queue: 'signature', key },
+    env: {},
+    store
+  })
+  assert(file.filename.startsWith('SIGNATURE-'), file.filename)
+  assert(file.pdf.toString('latin1').includes('INVOICE'), 'download is the signature invoice')
+  assert(!file.pdf.toString('latin1').includes('WHOLESALE'), 'download is not the pick list')
+
+  const marker = Buffer.from('%PDF-1.4\nmarker').toString('base64')
+  row.signature_pdf_base64 = marker
+  const again = await postComplete(env, store, completedEvent('task-1'), squareWorld)
+  assert(again.json.duplicate === true && again.json.queued !== true, JSON.stringify(again.json))
+  assert(row.signature_pdf_base64 === marker, 'second complete does not replace the pdf')
+  assert(squareWorld.squareCalls === callsAfterCreate, 'second complete does not read Square')
+
+  const marked = await handlePullSheets({
+    method: 'POST',
+    body: { key, queue: 'signature' },
+    env: {},
+    store,
+    now: new Date('2026-09-25T19:00:00.000Z')
+  })
+  assert(marked.json.status === 'printed' && marked.json.queue === 'signature', JSON.stringify(marked.json))
+  assert(row.signature_printed_at, 'printed marker')
+  assert(row.status === 'ready', 'signature mark does not print the pick list')
+  const after = await handlePullSheets({ method: 'GET', query: { queue: 'signature' }, env: {}, store })
+  assert(after.json.data.length === 0, 'printed signature leaves the queue')
+  const third = await postComplete(env, store, completedEvent('task-1'), squareWorld)
+  assert(third.json.duplicate === true && third.json.signatureStatus === 'printed', JSON.stringify(third.json))
+  assert(row.signature_pdf_base64 === marker, 'complete after print does not queue again')
+
+  const picks = await handlePullSheets({ method: 'GET', query: {}, env: {}, store })
+  assert(picks.json.data.length === 1, 'pick list is still waiting')
+  const pickFile = await handlePullSheets({
+    method: 'GET',
+    query: { format: 'pdf', key },
+    env: {},
+    store
+  })
+  assert(pickFile.filename.startsWith('pick-list-'), pickFile.filename)
+  assert(pickFile.pdf.toString('latin1').includes('WHOLESALE'), 'pick download unchanged')
+}
+
+async function testHouseAccountSignatureAndLegacyReread() {
+  const store = memoryStore()
+  const todoist = todoistFake()
+  const squareWorld = world()
+  squareWorld.order = orderFixture({ tenders: [{ type: 'OTHER', note: 'House account' }] })
+  const created = await postEvent(baseEnv(), store, todoist, {
+    type: 'order.updated',
+    data: { object: { order: { id: 'ORDER_HEBERT' } } }
+  }, squareWorld)
+  assert(created.json.created === true, JSON.stringify(created.json))
+  assert(store.rows[0].totals.documentKind === 'house_account', store.rows[0].totals.documentKind)
+  const done = await postComplete(baseEnv(), store, completedEvent('task-1', {
+    content: "PULL · Hebert's Maurice · house account"
+  }), squareWorld)
+  assert(done.json.queued === true && done.json.documentKind === 'house_account', JSON.stringify(done.json))
+  const pdf = Buffer.from(store.rows[0].signature_pdf_base64, 'base64').toString('latin1')
+  assert(pdf.includes('House account receipt') && pdf.includes('SIGNATURE'), pdf.slice(0, 400))
+  assert(!pdf.includes('INVOICE') && !pdf.includes('WHOLESALE'), 'house receipt banner')
+  assert(pdf.includes('$12.99'), 'house receipt uses the order price')
+
+  const legacy = memoryStore()
+  legacy.rows.push({
+    idempotency_key: 'order:ORDER_HEBERT',
+    order_id: 'ORDER_HEBERT',
+    invoice_id: 'inv:hebert-1',
+    invoice_number: '1042',
+    account_name: "Hebert's Maurice",
+    reference: '1042',
+    pick_date: 'Sep 22, 2026',
+    lines: [
+      { qty: '2', name: 'Stuffed Shrimp' },
+      { qty: '1', name: 'Seafood Gumbo (Quart)' }
+    ],
+    totals: null,
+    status: 'printed',
+    todoist_task_id: 'task-legacy',
+    pdf_base64: Buffer.from('%PDF-1.4 pick').toString('base64'),
+    signature_status: null,
+    signature_printed_at: null
+  })
+  const legacyWorld = world()
+  const fromSquare = await postComplete(baseEnv(), legacy, completedEvent('task-legacy'), legacyWorld)
+  assert(fromSquare.json.queued === true && fromSquare.json.documentKind === 'invoice', JSON.stringify(fromSquare.json))
+  assert(legacyWorld.squareCalls >= 2, `legacy re-read calls ${legacyWorld.squareCalls}`)
+  const legacyPdf = Buffer.from(legacy.rows[0].signature_pdf_base64, 'base64').toString('latin1')
+  assert(legacyPdf.includes('INVOICE') && legacyPdf.includes('$25.98'), 'legacy row priced from Square')
+  assert(!legacyPdf.includes('WHOLESALE'), 'legacy signature is not a pick list')
+  const calls = legacyWorld.squareCalls
+  const second = await postComplete(baseEnv(), legacy, completedEvent('task-legacy'), legacyWorld)
+  assert(second.json.duplicate === true, JSON.stringify(second.json))
+  assert(legacyWorld.squareCalls === calls, 'second legacy complete does not read Square again')
+}
+
+async function testTodoistWebhookSkips() {
+  const store = memoryStore()
+  store.rows.push({
+    idempotency_key: 'order:ORDER_HEBERT',
+    todoist_task_id: 'task-1',
+    status: 'ready',
+    signature_status: null,
+    lines: [{ qty: '1', name: 'Stuffed Shrimp' }],
+    totals: { priced: true, total: 100, currency: 'USD', documentKind: 'invoice' },
+    account_name: "Hebert's Maurice",
+    reference: '1042'
+  })
+
+  const bad = await handleTodoistWebhook({
+    rawBody: '{"event_name":"item:completed"}',
+    signature: 'nope',
+    env: baseEnv(),
+    store
+  })
+  assert(bad.status === 403, `bad todoist sig ${bad.status}`)
+  assert(store.rows[0].signature_status == null, 'bad signature queues nothing')
+
+  const missing = await handleTodoistWebhook({
+    rawBody: '{}',
+    signature: '',
+    env: baseEnv({ TODOIST_WEBHOOK_SECRET: '' }),
+    store
+  })
+  assert(missing.status === 503, `missing secret ${missing.status}`)
+
+  const prodBypass = await handleTodoistWebhook({
+    rawBody: '{}',
+    signature: '',
+    env: baseEnv({ NODE_ENV: 'production', WHOLESALE_PULL_DEV_BYPASS: '1', TODOIST_WEBHOOK_SECRET: '' }),
+    store
+  })
+  assert(prodBypass.status === 503, 'production bypass is ignored')
+
+  const { raw, signature } = signedTodoist(completedEvent('task-1'))
+  const disabled = await handleTodoistWebhook({
+    rawBody: raw,
+    signature,
+    env: baseEnv({ WHOLESALE_PULL_ENABLED: '' }),
+    store
+  })
+  assert(disabled.status === 200 && disabled.json.skipped === 'disabled', JSON.stringify(disabled.json))
+  assert(store.rows[0].signature_status == null, 'disabled does not queue')
+
+  const added = await postComplete(baseEnv(), store, {
+    event_name: 'item:added',
+    event_data: { id: 'task-1', project_id: TAKEOUT }
+  })
+  assert(added.json.ignored === true, JSON.stringify(added.json))
+  assert(store.rows[0].signature_status == null, 'item:added does not queue')
+
+  const packageEvent = await postComplete(baseEnv(), store, completedEvent('task-1', { project_id: PACKAGE_PROJECT_ID }))
+  assert(packageEvent.json.skipped === 'not_takeout', JSON.stringify(packageEvent.json))
+
+  const other = await postComplete(baseEnv(), store, completedEvent('task-other'))
+  assert(other.json.skipped === 'not_pull', JSON.stringify(other.json))
+
+  const race = await postComplete(baseEnv(), store, completedEvent('task-missing', {
+    description: 'square-pull-key: order:NOT_YET'
+  }))
+  assert(race.status === 503, `unstored pull ${race.status}`)
+
+  await expectThrow(() => handlePullSheets({
+    method: 'GET',
+    query: { queue: 'maurice' },
+    env: {},
+    store
+  }), 400)
+}
+
 function testSourceShape() {
   const root = path.join(__dirname, '..')
   const pull = fs.readFileSync(path.join(root, 'lib/wholesale-pull.js'), 'utf8')
@@ -746,6 +1091,25 @@ function testSourceShape() {
   const webhook = fs.readFileSync(path.join(root, 'pages/api/square/wholesale-pull/webhook.js'), 'utf8')
   assert(webhook.includes('bodyParser: false'), 'raw body for the signature')
   assert(!webhook.includes('authorizeBridge'), 'square signs the webhook itself')
+  const todoistHook = fs.readFileSync(path.join(root, 'pages/api/wholesale-pull/todoist-webhook.js'), 'utf8')
+  assert(todoistHook.includes('bodyParser: false'), 'raw body for the todoist signature')
+  assert(todoistHook.includes('x-todoist-hmac-sha256'), 'todoist hmac header')
+  assert(!todoistHook.includes('authorizeBridge'), 'todoist signs the webhook itself')
+  const sql = fs.readFileSync(path.join(root, 'supabase/wholesale_pulls.sql'), 'utf8')
+  assert(sql.includes('signature_pdf_base64'), 'signature pdf column')
+  assert(sql.includes('signature_printed_at'), 'signature printed marker')
+  assert(sql.includes('wholesale_pulls_todoist_task_id_uidx'), 'task id index')
+  const poll = fs.readFileSync(path.join(root, 'scripts/wholesale-pull-mac-poll.sh'), 'utf8')
+  assert(poll.includes('SIGNATURE-'), 'signature filename prefix')
+  assert(poll.includes('queue=signature'), 'signature queue')
+  assert(poll.includes('Brother_HL_L3280CDW_series'), 'brother queue lock')
+  assert(poll.includes('MFC-L5915DW is Maurice-only'), 'mfc refusal')
+  assert(!poll.includes('MFC-L5915DW_series'), 'poll does not target the mfc queue')
+  const docs = fs.readFileSync(path.join(root, 'docs/wholesale-pull.md'), 'utf8')
+  assert(docs.includes('TODOIST_WEBHOOK_SECRET'), 'docs name the webhook secret')
+  assert(docs.includes('no endpoint'), 'docs name the Square PDF limitation')
+  assert(docs.includes('Brother_HL_L3280CDW_series'), 'docs lock the printer')
+  assert(docs.includes('Jordan lock 2026-09-25'), 'docs cite the lock')
   const replay = fs.readFileSync(path.join(root, 'pages/api/wholesale-pull/replay.js'), 'utf8')
   assert(replay.includes('withBridgePost'), 'replay is bridge gated')
   const maurice = fs.readFileSync(path.join(root, 'pages/api/pick/maurice-restock/create.js'), 'utf8')
@@ -767,6 +1131,10 @@ async function main() {
   await testCreatingLockAndMissingName()
   await testReplayAndSheets()
   await testTakeoutDueFollowsChicagoMidnight()
+  testSignaturePdfShape()
+  await testCompleteQueuesSignatureInvoice()
+  await testHouseAccountSignatureAndLegacyReread()
+  await testTodoistWebhookSkips()
   testSourceShape()
   console.log('verify-wholesale-pull: ok')
 }

@@ -30,7 +30,8 @@ Daily production logging app for Rachael's Wholesale LLC.
 | `TODOIST_TOKEN` | Todoist API Token |
 | `TODOIST_COOK_PROJECT_ID` | Todoist Cook Board Project ID (optional) |
 | `TODOIST_TAKEOUT_PROJECT_ID` | Todoist Takeout project for wholesale pull tasks (`6cv69FrQF2QcqVqw`). Required for the Square pull webhook. Do not set this to the Package project. |
-| `WHOLESALE_PULL_ENABLED` | Set to `1` to create Takeout tasks from the Square webhook. Unset skips events after the signature check. |
+| `WHOLESALE_PULL_ENABLED` | Set to `1` to create Takeout tasks from the Square webhook and to queue a signature invoice when that task is checked off. Unset skips both webhooks after the signature check. |
+| `TODOIST_WEBHOOK_SECRET` | Todoist app client secret for `POST /api/wholesale-pull/todoist-webhook` (`item:completed`). Not the API token. Webhook returns 503 if unset (except a non-production dev bypass). |
 | `SQUARE_WEBHOOK_SIGNATURE_KEY` | Square webhook signature key. Webhook returns 503 if unset (except a non-production dev bypass). |
 | `SQUARE_WEBHOOK_NOTIFICATION_URL` | Exact webhook URL registered in Square. Defaults to the request URL when unset. |
 | `TWILIO_ACCOUNT_SID` | Twilio account for the wholesale text webhook. Webhook returns 503 if this and `TWILIO_AUTH_TOKEN` are unset (except a non-production dev bypass). |
@@ -52,5 +53,5 @@ The Daily Log at `/` stays open. Only Sales (`/dashboard` and APIs that return r
 - Read-only Square bridge for assistants (`GET /api/square/*`) — see [docs/square-bridge.md](docs/square-bridge.md)
 - Unpaid wholesale invoices from text (`POST /api/square/invoices/create` and the Twilio inbound stub) — see [docs/wholesale-text-orders.md](docs/wholesale-text-orders.md)
 - Maurice nightly pick QR (daily Send is inventory plus a week log, dry-run until both live flags are set; Monday rolls the prior Mon–Sat into one unpaid wholesale invoice) — see [docs/maurice-restock-pick-qr.md](docs/maurice-restock-pick-qr.md)
-- Wholesale Square invoices and house-account receipts → Todoist **Takeout** pull task (p1, top of the board) and a qty/name pick-list PDF with a WHOLESALE banner. The wholesale Mac (user `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`) drops that PDF in `~/Documents/Wholesale Ordering/pull-sheets/`. CUPS queue: `Brother_HL_L3280CDW_series`. See [docs/wholesale-pull.md](docs/wholesale-pull.md)
+- Wholesale Square invoices and house-account receipts → Todoist **Takeout** pull task (p1, due today in America/Chicago, top of the board) and a qty/name pick-list PDF with a WHOLESALE banner. Checking off that task queues a separate signature invoice PDF (prices, total, signature line). The wholesale Mac (user `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`) drops both files in `~/Documents/Wholesale Ordering/pull-sheets/` and prints them only on `Brother_HL_L3280CDW_series`. See [docs/wholesale-pull.md](docs/wholesale-pull.md)
 - Sales dashboard at `/dashboard` (today / WTD / MTD per location, America/Chicago). Gated by `SALES_DASHBOARD_PIN`; Daily Log is not.

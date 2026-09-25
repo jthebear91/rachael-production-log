@@ -2,6 +2,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const { chicagoISODate } = require('../lib/chicago-time')
 const { buildPickListPdf } = require('../lib/pick-list-pdf')
 const { HEBERTS_PUBLIC_NAME } = require('../lib/public-label')
 const { orderKeyBefore } = require('../lib/todoist-order-key')
@@ -245,7 +246,7 @@ function signed(body, key = SIGNING_KEY) {
   }
 }
 
-async function postEvent(env, store, todoist, event, squareWorld) {
+async function postEvent(env, store, todoist, event, squareWorld, now = new Date('2026-09-24T17:00:00.000Z')) {
   const { raw, signature } = signed(event)
   return handleSquareWebhook({
     rawBody: raw,
@@ -255,7 +256,7 @@ async function postEvent(env, store, todoist, event, squareWorld) {
     squareFetch: squareFetchFor(squareWorld),
     store,
     todoistFetch: todoist.fetch,
-    now: new Date('2026-09-24T17:00:00.000Z')
+    now
   })
 }
 
@@ -359,6 +360,8 @@ async function testUnpaidInvoiceCreatesTakeoutTask() {
   assert(body.project_id === TAKEOUT, 'takeout project')
   assert(body.project_id !== PACKAGE_PROJECT_ID, 'not package')
   assert(body.priority === 4, `priority ${body.priority}`)
+  assert(body.due_date === '2026-09-24', `due ${body.due_date}`)
+  assert(!body.due_datetime && !body.due, 'all-day due_date only')
   assert(body.section_id === 'sec-left', body.section_id)
   assert(body.order_key === 'a0' && body.order_key < 'a1', body.order_key)
   assert(body.child_order === 0, `child_order ${body.child_order}`)
@@ -387,6 +390,7 @@ async function testUnpaidInvoiceCreatesTakeoutTask() {
   }, squareWorld)
   assert(again.json.duplicate === true && again.json.created === false, JSON.stringify(again.json))
   assert(todoist.created.length === 1, 'duplicate webhook did not create a second task')
+  assert(todoist.created[0].due_date === '2026-09-24', 'duplicate did not replace the due date')
 
   const payment = await postEvent(env, store, todoist, {
     type: 'payment.updated',
@@ -510,6 +514,7 @@ async function testHouseAccountOrderAndAllCompleted() {
   }, squareWorld)
   assert(created.json.created === true, JSON.stringify(created.json))
   assert(todoist.created[0].priority === 4, 'house account is p1')
+  assert(todoist.created[0].due_date === '2026-09-24', 'house account due is chicago today')
   assert(todoist.created[0].content === "PULL · Hebert's Maurice · house account", todoist.created[0].content)
   assert(!todoist.created[0].content.includes('$'), 'house account title has no dollars')
 
@@ -522,6 +527,7 @@ async function testHouseAccountOrderAndAllCompleted() {
   }, cardWorld)
   assert(card.json.created === true, JSON.stringify(card.json))
   assert(cardTodoist.created[0].project_id === TAKEOUT, 'all-completed still uses takeout')
+  assert(cardTodoist.created[0].due_date === '2026-09-24', 'all-completed due is chicago today')
 }
 
 async function testCreatingLockAndMissingName() {
@@ -605,15 +611,19 @@ async function testReplayAndSheets() {
 
   const store = memoryStore()
   const writer = todoistFake()
+  const replayNow = new Date('2026-09-25T04:30:00.000Z')
   const applied = await handleReplay({
     body: { paymentId: 'PAY_HEBERT', apply: true },
     env: baseEnv(),
     squareFetch: squareFetchFor(world()),
     store,
-    todoistFetch: writer.fetch
+    todoistFetch: writer.fetch,
+    now: replayNow
   })
   assert(applied.json.created === true && applied.json.priority === 'p1', JSON.stringify(applied.json))
   assert(writer.created[0].project_id === TAKEOUT, 'replay writes takeout')
+  assert(writer.created[0].due_date === '2026-09-24', `replay due follows chicago not utc (${writer.created[0].due_date})`)
+  assert(replayNow.toISOString().slice(0, 10) === '2026-09-25', 'fixture instant is the next utc date')
 
   const sheets = await handlePullSheets({ method: 'GET', query: {}, env: {}, store })
   assert(sheets.json.data.length === 1, 'one pending pdf')
@@ -649,6 +659,84 @@ async function testReplayAndSheets() {
   assert(forced.json.apply === false && forced.json.lines.length === 2, JSON.stringify(forced.json))
 }
 
+function chicagoWorld(orderId, invoiceId) {
+  const squareWorld = world()
+  squareWorld.invoice = { ...invoiceFixture(), id: invoiceId, order_id: orderId }
+  squareWorld.order = orderFixture({ id: orderId })
+  return squareWorld
+}
+
+async function testTakeoutDueFollowsChicagoMidnight() {
+  assert(chicagoISODate(new Date('2026-09-25T04:59:00.000Z')) === '2026-09-24', 'cdt still previous day')
+  assert(chicagoISODate(new Date('2026-09-25T05:00:00.000Z')) === '2026-09-25', 'cdt midnight is the new day')
+  assert(chicagoISODate(new Date('2026-01-15T05:59:00.000Z')) === '2026-01-14', 'cst still previous day')
+  assert(chicagoISODate(new Date('2026-01-15T06:00:00.000Z')) === '2026-01-15', 'cst midnight is the new day')
+
+  const before = new Date('2026-09-25T04:59:00.000Z')
+  const after = new Date('2026-09-25T05:00:00.000Z')
+  const earlyStore = memoryStore()
+  const earlyTodoist = todoistFake()
+  const earlyEvent = {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:before-midnight' } } }
+  }
+  const early = await postEvent(
+    baseEnv(),
+    earlyStore,
+    earlyTodoist,
+    earlyEvent,
+    chicagoWorld('ORDER_BEFORE', 'inv:before-midnight'),
+    before
+  )
+  assert(early.json.created === true, JSON.stringify(early.json))
+  assert(earlyTodoist.created[0].due_date === '2026-09-24', earlyTodoist.created[0].due_date)
+  assert(!earlyTodoist.created[0].due_datetime, 'no due time before midnight')
+
+  const again = await postEvent(
+    baseEnv(),
+    earlyStore,
+    earlyTodoist,
+    earlyEvent,
+    chicagoWorld('ORDER_BEFORE', 'inv:before-midnight'),
+    after
+  )
+  assert(again.json.duplicate === true && again.json.created === false, JSON.stringify(again.json))
+  assert(earlyTodoist.created.length === 1, 'midnight duplicate did not create another task')
+  assert(earlyTodoist.created[0].due_date === '2026-09-24', 'existing due was left alone')
+
+  const lateTodoist = todoistFake()
+  const lateWorld = chicagoWorld('ORDER_AFTER', 'inv:after-midnight')
+  const lateCreated = await postEvent(
+    baseEnv(),
+    memoryStore(),
+    lateTodoist,
+    {
+      type: 'invoice.published',
+      data: { object: { invoice: { id: 'inv:after-midnight' } } }
+    },
+    lateWorld,
+    after
+  )
+  assert(lateCreated.json.created === true, JSON.stringify(lateCreated.json))
+  assert(lateTodoist.created[0].due_date === '2026-09-25', lateTodoist.created[0].due_date)
+
+  const winterTodoist = todoistFake()
+  const winter = await postEvent(
+    baseEnv(),
+    memoryStore(),
+    winterTodoist,
+    {
+      type: 'invoice.published',
+      data: { object: { invoice: { id: 'inv:winter' } } }
+    },
+    chicagoWorld('ORDER_WINTER', 'inv:winter'),
+    new Date('2026-01-15T05:30:00.000Z')
+  )
+  assert(winter.json.created === true, JSON.stringify(winter.json))
+  assert(winterTodoist.created[0].due_date === '2026-01-14', winterTodoist.created[0].due_date)
+  assert(new Date('2026-01-15T05:30:00.000Z').toISOString().slice(0, 10) === '2026-01-15', 'utc date is the next day')
+}
+
 function testSourceShape() {
   const root = path.join(__dirname, '..')
   const pull = fs.readFileSync(path.join(root, 'lib/wholesale-pull.js'), 'utf8')
@@ -678,6 +766,7 @@ async function main() {
   await testHouseAccountOrderAndAllCompleted()
   await testCreatingLockAndMissingName()
   await testReplayAndSheets()
+  await testTakeoutDueFollowsChicagoMidnight()
   testSourceShape()
   console.log('verify-wholesale-pull: ok')
 }

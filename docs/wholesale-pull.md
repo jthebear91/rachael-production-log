@@ -20,7 +20,7 @@ Todoist task, priority **p1** (API priority `4`), inserted at the **top** of the
 
 House-account receipts use kind `house account`. Unpaid invoices use the invoice number. The title never includes `$`, other currency symbols, or a formatted amount such as `$2,568`. A total may stay in the Todoist description or in Square. The description is the line list (qty and Square catalog name), a Square Dashboard link, and a `square-pull-key:` line. Prices and SKUs are not copied onto the pick list. A duplicate Square event for the same order or invoice updates nothing.
 
-The pick-list PDF has the account, Chicago date, reference, and the same qty + name lines. It is not a signature invoice.
+The pick-list PDF opens with a full-width **WHOLESALE** banner so it is not mistaken for a Maurice nightly restock sheet. Under that: account, Chicago date, reference, and the same qty + name lines. It is not a signature invoice or receipt, and this app does not print those.
 
 ## Webhook
 
@@ -80,6 +80,15 @@ Hebert's Maurice practice sale:
 node scripts/wholesale-pull-replay.cjs --heberts --out /tmp/heberts-pick-list.pdf
 ```
 
+To preview this checkout's PDF (WHOLESALE banner, no production call, no Todoist write):
+
+```bash
+node scripts/wholesale-pull-replay.cjs --local --invoice-number 000225 --out /tmp/nunu-000225.pdf
+node scripts/wholesale-pull-replay.cjs --local --heberts --out /tmp/heberts-pick-list.pdf
+```
+
+`--local` reads Square with `SQUARE_WHOLESALE_TOKEN`. It refuses `--apply`. A paid invoice or a non-house-account receipt returns a skip unless you add `--force` (still no charge, still wholesale location only).
+
 That uses the order id. The matching payment:
 
 ```bash
@@ -105,14 +114,18 @@ curl -sS -X POST "https://rachael-production-log.vercel.app/api/wholesale-pull/r
 
 ## How the facility Mac gets the PDF
 
-Vercel cannot see the office printer. The server stores the PDF. A Mac on the wholesale machine drops it in the same documents tree as the other wholesale sheets. This script does not install a LaunchAgent and does not call the Maurice mint handoff.
+v1 printing is a folder drop. Vercel cannot see the office printer, and `WHOLESALE_PULL_PRINTER` does not have to be set. The server stores the PDF. A Mac on the wholesale machine downloads it into the folder the facility already watches:
+
+`~/Documents/Wholesale Ordering/pull-sheets/`
+
+That directory sits under `~/Documents/Wholesale Ordering/`. Dropping the file there is the print path. CUPS is optional later, only after the queue name is known. This script does not install a LaunchAgent and does not call the Maurice mint handoff.
 
 ```bash
 BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh --dry-run
 BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
 ```
 
-Files land in `~/Documents/Wholesale Ordering/pull-sheets/`. Set `WHOLESALE_PULL_PRINTER` on that Mac only if CUPS should print after the file is saved. The queue name is not known yet; folder-only is the v1 default. Leave the variable unset until the queue is confirmed.
+Leave `WHOLESALE_PULL_PRINTER` unset. If it is set on that Mac, the script also sends the saved file to that CUPS queue after the drop. Unset, it only writes the PDF.
 
 `GET /api/wholesale-pull/sheets` lists unprinted pulls. `GET /api/wholesale-pull/sheets?format=pdf&key=order:…` downloads one. `POST /api/wholesale-pull/sheets` with `{ "key": "order:…" }` marks it printed. All three require `BRIDGE_API_KEY`.
 
@@ -139,6 +152,7 @@ Files land in `~/Documents/Wholesale Ordering/pull-sheets/`. Set `WHOLESALE_PULL
 2. **Token scopes** (read only). The wholesale token needs `INVOICES_READ`, `ORDERS_READ`, `PAYMENTS_READ`, `CUSTOMERS_READ`, and `ITEMS_READ`. It must not be used to charge cards. This feature never calls Payments create or `inventory.batchChange`.
 3. **Supabase SQL** `supabase/wholesale_pulls.sql` has to be applied once or PDFs are not queued for the Mac.
 4. **Feature flag** stays off until the three items above are done. Then set `WHOLESALE_PULL_ENABLED=1` and redeploy.
-5. **Printer queue** is unconfirmed. v1 is folder-only under `~/Documents/Wholesale Ordering/pull-sheets/`. Do not install a LaunchAgent from this change.
-6. **Hebert's practice print** waits on Jordan. Replay with `apply: false` first. `--apply` creates the Takeout task and still does not print.
-7. **House-account shape.** If Hebert's receipt is a card tender rather than EXTERNAL/OTHER, the webhook skips it until `WHOLESALE_PULL_ALL_COMPLETED=1` or a replay with `--force`. Confirm on the dry run before turning the flag on.
+5. **Printer queue / CUPS** is still not launched. v1 only drops files in `~/Documents/Wholesale Ordering/pull-sheets/`. Do not set `WHOLESALE_PULL_PRINTER` and do not install a LaunchAgent from this change.
+6. **Merge** of this PR to `main` has not happened. Production does not serve the WHOLESALE banner until that ships.
+7. **Hebert's practice task** waits on Jordan. Replay with `apply: false` first. `--apply` creates the Takeout task and still does not print.
+8. **House-account shape.** If Hebert's receipt is a card tender rather than EXTERNAL/OTHER, the webhook skips it until `WHOLESALE_PULL_ALL_COMPLETED=1` or a replay with `--force`. Confirm on the dry run before turning the flag on.

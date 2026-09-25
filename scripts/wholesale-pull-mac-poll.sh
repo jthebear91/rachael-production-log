@@ -1,14 +1,16 @@
 #!/bin/bash
 # Download new wholesale pick-list PDFs into the facility drop folder.
 # Does not touch Maurice mint_handoff, LaunchAgents, or the nightly pick QR.
-# Printing is off unless WHOLESALE_PULL_PRINTER is set on this Mac.
-# This script is not run in CI.
+# v1 print path is the folder drop. WHOLESALE_PULL_PRINTER is optional and
+# not required. This script is not run in CI.
 #
 #   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
 #   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh --dry-run
 #
-# Folder: ~/Documents/Wholesale Ordering/pull-sheets/
-# Optional: WHOLESALE_PULL_PRINTER="HP_something" to send the file to CUPS after the download.
+# Drop folder (watched by the facility Mac):
+#   ~/Documents/Wholesale Ordering/pull-sheets/
+# Optional later: WHOLESALE_PULL_PRINTER="HP_something" sends the saved file
+# to CUPS. Leave it unset until the queue name is known.
 
 set -euo pipefail
 

@@ -1,16 +1,25 @@
 #!/bin/bash
 # Download new wholesale pick-list PDFs into the facility drop folder.
 # Does not touch Maurice mint_handoff, LaunchAgents, or the nightly pick QR.
-# v1 print path is the folder drop. WHOLESALE_PULL_PRINTER is optional and
-# not required. This script is not run in CI.
+# This script is not run in CI.
 #
-#   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
-#   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh --dry-run
+# Run this on the Trey laptop only:
+#   hostname Trey-s-A25
+#   user rachaelsseafood
+# Do not run it on the Mac mini.
 #
-# Drop folder (watched by the facility Mac):
+# Folder drop still works with WHOLESALE_PULL_PRINTER unset:
 #   ~/Documents/Wholesale Ordering/pull-sheets/
-# Optional later: WHOLESALE_PULL_PRINTER="HP_something" sends the saved file
-# to CUPS. Leave it unset until the queue name is known.
+#
+# Recommended CUPS queue (exact name) on that laptop:
+#   WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series
+# Model: Brother HL-L3280CDW
+# Device URI: dnssd://Brother%20HL-L3280CDW%20series._ipps._tcp.local./?uuid=e3248000-80ce-11db-8000-94ddf83ac040
+# Leave the variable unset for folder-drop only. Never send wholesale to the
+# Maurice cafe queue Brother_MFC_L5915DW_series.
+#
+#   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh --dry-run
+#   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
 
 set -euo pipefail
 
@@ -29,15 +38,44 @@ fi
 
 mkdir -p "$DEST"
 payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets" -H "Authorization: Bearer ${BRIDGE_API_KEY}")"
+HOST_SHORT="$(hostname -s 2>/dev/null || hostname)"
+RUN_USER="$(id -un)"
 
-python3 - "$payload" "$DEST" "$DRY" "$BASE" <<'PY'
+python3 - "$payload" "$DEST" "$DRY" "$BASE" "$HOST_SHORT" "$RUN_USER" <<'PY'
 import json, os, subprocess, sys, urllib.parse, urllib.request
 
-payload, dest, dry, base = sys.argv[1:]
+payload, dest, dry, base, host_short, run_user = sys.argv[1:]
 dry = dry == "1"
 data = json.loads(payload).get("data") or []
 key = os.environ["BRIDGE_API_KEY"]
+# Recommended queue. Unset stays folder-drop only; do not fill this in when the env is empty.
+RECOMMENDED_QUEUE = "Brother_HL_L3280CDW_series"
+MAURICE_CAFE_QUEUE = "Brother_MFC_L5915DW_series"
 printer = os.environ.get("WHOLESALE_PULL_PRINTER", "").strip()
+on_trey = host_short.lower().split(".")[0] == "trey-s-a25" and run_user == "rachaelsseafood"
+
+if printer:
+    folded = printer.lower()
+    if printer == MAURICE_CAFE_QUEUE or "mfc_l5915" in folded or "mfc-l5915" in folded:
+        print(
+            "Refusing Maurice cafe queue Brother_MFC_L5915DW_series. "
+            "Wholesale CUPS target is Brother_HL_L3280CDW_series on the Trey laptop.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if printer != RECOMMENDED_QUEUE:
+        print(
+            f"WHOLESALE_PULL_PRINTER must be {RECOMMENDED_QUEUE}, or unset for folder-drop only.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not on_trey:
+        print(
+            "Wholesale CUPS print runs only on the Trey laptop "
+            "(hostname Trey-s-A25, user rachaelsseafood), not the Mac mini.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 if not data:
     print("No pending pick lists.")

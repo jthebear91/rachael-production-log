@@ -2,6 +2,8 @@
 
 const fs = require('fs')
 const path = require('path')
+const { buildPickListPdf } = require('../lib/pick-list-pdf')
+const { HEBERTS_PUBLIC_NAME } = require('../lib/public-label')
 const { orderKeyBefore } = require('../lib/todoist-order-key')
 const { squareSignature } = require('../lib/square-webhook')
 const {
@@ -305,6 +307,22 @@ function testTakeoutTitlesOmitMoney() {
     assert(!/\d{1,3}(?:,\d{3})+/.test(title), title)
     assert(title.startsWith('PULL · '), title)
   }
+  assert(
+    buildTaskTitle({ account: `${HEBERTS_PUBLIC_NAME} (A Bears)`, kind: 'house account' }) === `PULL · ${HEBERTS_PUBLIC_NAME} · house account`,
+    'strips the speech nickname from the title'
+  )
+  assert(
+    buildTaskTitle({ account: 'A Bears', kind: 'invoice' }) === `PULL · ${HEBERTS_PUBLIC_NAME} · invoice`,
+    'nickname-only account uses the public name'
+  )
+  const nickPdf = buildPickListPdf({
+    account: `${HEBERTS_PUBLIC_NAME} (A Bears)`,
+    dateLabel: 'Sep 24, 2026',
+    reference: '000225',
+    lines: [{ qty: '1', name: 'Stuffed Shrimp' }]
+  }).toString('latin1')
+  assert(!nickPdf.includes('A Bears'), 'pdf account line omits the speech nickname')
+  assert(nickPdf.includes(HEBERTS_PUBLIC_NAME), 'pdf keeps the public account')
 }
 
 function testSquareGuard() {

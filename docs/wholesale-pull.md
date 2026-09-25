@@ -4,7 +4,7 @@ When a wholesale Square invoice is unpaid, or a house-account receipt is complet
 
 It does **not** create tasks on the Package board. Package (`6cv69FHPW88HVjH8`) stays packaging and production work. Shopify → Takeout is a separate Zapier change; point that zap at the same Takeout project, priority p1, due date = America/Chicago today, and the top of the board.
 
-It does **not** print the Square invoice or house-account receipt, charge a card, or touch Maurice nightly pick QR, mint handoff, or inventory deduct.
+The pick list is queued when the pull is created. A separate signature invoice is queued when that Takeout task is checked off. Square's own invoice PDF is not downloaded: the Invoices API has no endpoint for those bytes, and this app does not scrape the Square Dashboard. This app does not charge a card, and it does not touch Maurice nightly pick QR, mint handoff, or inventory deduct.
 
 Production host: `https://rachael-production-log.vercel.app`
 
@@ -24,7 +24,7 @@ The create body sets an all-day `due_date` of `YYYY-MM-DD` for the board day: ca
 
 The Hebert's account on titles and pick-list account lines is Hebert's Specialty Meats (Heberts). A speech-only nickname is removed before either is written. Do not use that nickname in examples.
 
-The pick-list PDF opens with a full-width **WHOLESALE** banner so it is not mistaken for a Maurice nightly restock sheet. Under that: account, Chicago date, reference, and the same qty + name lines. It is not a signature invoice or receipt, and this app does not print those.
+The pick-list PDF opens with a full-width **WHOLESALE** banner so it is not mistaken for a Maurice nightly restock sheet. Under that: account, Chicago date, reference, and the same qty + name lines. Prices stay off this sheet. The signature invoice is a different PDF, queued only after the Takeout task is completed.
 
 ## Webhook
 
@@ -69,7 +69,41 @@ Run [supabase/wholesale_pulls.sql](../supabase/wholesale_pulls.sql) in the Supab
 
 The primary key is `order:{orderId}` when Square has an order, otherwise the invoice or payment id. A second webhook for the same order returns the existing Takeout task id.
 
-The PDF is stored on that row. Without Supabase the Takeout task is still created and the response includes a warning; the Mac folder will not see a file until the table exists.
+The pick-list PDF is stored on that row, with line prices and order totals kept for the later signature sheet. Without Supabase the Takeout task is still created and the response includes a warning; the Mac folder will not see a file until the table exists.
+
+## When the crew checks off the Takeout task
+
+Jordan lock 2026-09-25: completing the Takeout pull task prints a **signature invoice**, not another pick list, on the wholesale Brother HL-L3280CDW.
+
+`POST /api/wholesale-pull/todoist-webhook`
+
+Todoist signs the raw body. The route does not use `BRIDGE_API_KEY`. In the Todoist app, add a webhook:
+
+1. Callback URL: `https://rachael-production-log.vercel.app/api/wholesale-pull/todoist-webhook`
+2. Event: `item:completed`
+3. Copy the app client secret into Vercel as `TODOIST_WEBHOOK_SECRET`. That secret is not `TODOIST_TOKEN`.
+
+The check is base64 HMAC-SHA256 of the raw body, header `X-Todoist-Hmac-SHA256`. A missing secret is **503**. A bad signature is **403**. `WHOLESALE_PULL_DEV_BYPASS=1` skips the signature only when `NODE_ENV` is not `production`.
+
+`WHOLESALE_PULL_ENABLED` must be `1` or the webhook returns 200 `{ "skipped": "disabled" }` after a valid signature and queues nothing.
+
+The handler keeps the event only when all of these are true:
+
+- `event_name` is `item:completed`
+- `project_id` is the Takeout project. Package and every other project are ignored.
+- `wholesale_pulls.todoist_task_id` matches the completed task
+
+It builds the signature PDF and sets `signature_status` to `ready` with `signature_pdf_base64`. The pick-list `status` is left alone. The Mac poll is what sets `signature_status` to `printed` and fills `signature_printed_at`.
+
+The PDF is not the pick list. It has priced lines, tax and total when Square sent them, and a signature line. An unpaid invoice uses an **INVOICE** banner. A house-account sale with no Square invoice uses a **SIGNATURE** banner and the words "House account receipt", from the order and payment already stored on the row. Neither banner is **WHOLESALE**.
+
+Hebert's on this PDF is Hebert's Specialty Meats. The speech nickname is removed before the account line or an item name is written.
+
+A second `item:completed` for the same task does not queue another PDF. `signature_status` of `ready` or `printed`, or a set `signature_printed_at`, is the lock.
+
+Rows created before prices were stored are read again with `GET` on the invoice, order, or payment so the sheet can still show amounts. That read does not charge a card and does not change inventory.
+
+Re-run [supabase/wholesale_pulls.sql](../supabase/wholesale_pulls.sql) if the table already exists. The ALTER block adds `totals`, `signature_pdf_base64`, `signature_status`, `signature_printed_at`, and a unique index on `todoist_task_id`. It is safe to run again.
 
 ## Dry run (no print)
 
@@ -118,9 +152,11 @@ curl -sS -X POST "https://rachael-production-log.vercel.app/api/wholesale-pull/r
 
 ## How the facility Mac gets the PDF
 
-The server stores the PDF. Vercel cannot see the office printer. The poll still drops each file here:
+The server stores both PDFs. Vercel cannot see the office printer. The poll drops each file here:
 
 `~/Documents/Wholesale Ordering/pull-sheets/`
+
+Pick lists are `pick-list-*.pdf`. Signature invoices are `SIGNATURE-*.pdf`. Both use the same CUPS queue.
 
 Run the poll on the wholesale Mac: user `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`. The Mac network name may show as `Trey-s-A25`. That is the network name only. Do not run this script on the Mac mini.
 
@@ -139,16 +175,19 @@ BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
 
 An empty `WHOLESALE_PULL_PRINTER` skips CUPS and still writes the PDF. The default sends the saved file to `Brother_HL_L3280CDW_series` only when the user and machine id match the wholesale Mac. The script exits instead of sending a job to any other queue. This script does not install a LaunchAgent and does not call the Maurice mint handoff.
 
-`GET /api/wholesale-pull/sheets` lists unprinted pulls. `GET /api/wholesale-pull/sheets?format=pdf&key=order:…` downloads one. `POST /api/wholesale-pull/sheets` with `{ "key": "order:…" }` marks it printed. All three require `BRIDGE_API_KEY`.
+`GET /api/wholesale-pull/sheets` lists unprinted pick lists. `GET /api/wholesale-pull/sheets?format=pdf&key=order:…` downloads one. `POST /api/wholesale-pull/sheets` with `{ "key": "order:…" }` marks the pick list printed.
+
+`GET /api/wholesale-pull/sheets?queue=signature` lists signature invoices waiting to print. `GET /api/wholesale-pull/sheets?format=pdf&queue=signature&key=order:…` downloads that PDF, not the pick list. `POST /api/wholesale-pull/sheets` with `{ "key": "order:…", "queue": "signature" }` marks the signature printed. All of these require `BRIDGE_API_KEY`.
 
 ## Vercel env
 
 | Variable | Required | Notes |
 |---|---|---|
-| `WHOLESALE_PULL_ENABLED` | Yes, to go live | `1` or the webhook no-ops |
+| `WHOLESALE_PULL_ENABLED` | Yes, to go live | `1` or both webhooks no-op after the signature check |
 | `TODOIST_TOKEN` | Yes | Same token the app already uses. Fail closed if unset. |
 | `TODOIST_TAKEOUT_PROJECT_ID` | Yes | `6cv69FrQF2QcqVqw`. Not the Package id. |
-| `SQUARE_WEBHOOK_SIGNATURE_KEY` | Yes | From the webhook subscription. Not the access token. |
+| `SQUARE_WEBHOOK_SIGNATURE_KEY` | Yes | From the Square webhook subscription. Not the access token. |
+| `TODOIST_WEBHOOK_SECRET` | Yes, to print on complete | Todoist app client secret. Header `X-Todoist-Hmac-SHA256`. Not `TODOIST_TOKEN`. |
 | `SQUARE_WEBHOOK_NOTIFICATION_URL` | Yes | Exact subscription URL. |
 | `SQUARE_WHOLESALE_TOKEN` | Yes | Falls back to `SQUARE_TOKEN`. Read scopes only. |
 | `SQUARE_WHOLESALE_LOCATION_ID` | Yes | `L6D106R4VNA72`. Falls back to `SQUARE_LOCATION_ID`. |
@@ -164,7 +203,8 @@ An empty `WHOLESALE_PULL_PRINTER` skips CUPS and still writes the PDF. The defau
 2. **Token scopes** (read only). The wholesale token needs `INVOICES_READ`, `ORDERS_READ`, `PAYMENTS_READ`, `CUSTOMERS_READ`, and `ITEMS_READ`. It must not be used to charge cards. This feature never calls Payments create or `inventory.batchChange`.
 3. **Supabase SQL** `supabase/wholesale_pulls.sql` has to be applied once or PDFs are not queued for the Mac.
 4. **Feature flag** stays off until the three items above are done. Then set `WHOLESALE_PULL_ENABLED=1` and redeploy.
-5. **CUPS is not launched from this repo.** Folder drop still works. Default is `WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series` (Brother HL-L3280CDW) on the wholesale Mac (user `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`). The network name may be `Trey-s-A25`; that is not the printer. When CUPS is armed, that queue is the only wholesale target. MFC-L5915DW is Maurice-only and must never be used for wholesale. Do not install a LaunchAgent from this change.
-6. **Merge** of this PR to `main` has not happened. Production does not serve the WHOLESALE banner until that ships.
-7. **Hebert's practice task** waits on Jordan. Replay with `apply: false` first. `--apply` creates the Takeout task and still does not print.
-8. **House-account shape.** If Hebert's receipt is a card tender rather than EXTERNAL/OTHER, the webhook skips it until `WHOLESALE_PULL_ALL_COMPLETED=1` or a replay with `--force`. Confirm on the dry run before turning the flag on.
+5. **CUPS is not launched from this repo.** Folder drop still works. Default is `WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series` (Brother HL-L3280CDW) on the wholesale Mac (user `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`). The network name may be `Trey-s-A25`; that is not the printer. When CUPS is armed, that queue is the only wholesale target for the pick list and the signature invoice. MFC-L5915DW is Maurice-only and must never be used for wholesale. Do not install a LaunchAgent from this change.
+6. **Todoist webhook** is not created by this repo. Subscribe `item:completed` to the callback URL above and set `TODOIST_WEBHOOK_SECRET`.
+7. **Signature columns.** Re-run `supabase/wholesale_pulls.sql` so `signature_status` and `todoist_task_id` exist. Without that, a completed task cannot be queued for the Mac.
+8. **Hebert's practice task** waits on Jordan. Replay with `apply: false` first. `--apply` creates the Takeout task. The signature PDF is queued only after that task is checked off, and only the Mac poll sends it to the printer.
+9. **House-account shape.** If Hebert's receipt is a card tender rather than EXTERNAL/OTHER, the Square webhook skips it until `WHOLESALE_PULL_ALL_COMPLETED=1` or a replay with `--force`. Confirm on the dry run before turning the flag on. A pull that has no Square invoice still gets a house-account receipt for signature when its Takeout task is completed.

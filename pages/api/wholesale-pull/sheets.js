@@ -14,7 +14,8 @@ export default async function handler(req, res) {
       method: req.method,
       query: {
         format: one(req.query.format),
-        key: one(req.query.key)
+        key: one(req.query.key),
+        queue: one(req.query.queue)
       },
       body: req.body,
       env: process.env

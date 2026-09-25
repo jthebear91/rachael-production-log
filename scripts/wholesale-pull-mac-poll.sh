@@ -1,7 +1,7 @@
 #!/bin/bash
-# Download new wholesale pick-list PDFs into the facility drop folder.
-# Does not touch Maurice mint_handoff, LaunchAgents, or the nightly pick QR.
-# This script is not run in CI.
+# Download new wholesale pick-list PDFs and signature invoice PDFs into the
+# facility drop folder. Does not touch Maurice mint_handoff, LaunchAgents, or
+# the nightly pick QR. This script is not run in CI.
 #
 # Run this on the wholesale Mac only:
 #   user rachaelsseafood
@@ -12,9 +12,12 @@
 # Folder drop (always, including when CUPS is skipped):
 #   ~/Documents/Wholesale Ordering/pull-sheets/
 #
+# Pick lists are saved as pick-list-*.pdf.
+# Signature invoices (Takeout task checked off) are saved as SIGNATURE-*.pdf.
+#
 # Default CUPS queue (exact). Model: Brother HL-L3280CDW.
 # WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series
-# When CUPS is armed, that queue is the only wholesale target.
+# When CUPS is armed, that queue is the only wholesale target for both PDFs.
 # Device URI: dnssd://Brother%20HL-L3280CDW%20series._ipps._tcp.local./?uuid=e3248000-80ce-11db-8000-94ddf83ac040
 # Set WHOLESALE_PULL_PRINTER to empty for folder-drop only.
 # MFC-L5915DW is Maurice-only and must never be used for wholesale.
@@ -38,19 +41,21 @@ if [[ -z "${BRIDGE_API_KEY:-}" ]]; then
 fi
 
 mkdir -p "$DEST"
-payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets" -H "Authorization: Bearer ${BRIDGE_API_KEY}")"
+pick_payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets" -H "Authorization: Bearer ${BRIDGE_API_KEY}")"
+signature_payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets?queue=signature" -H "Authorization: Bearer ${BRIDGE_API_KEY}")"
 RUN_USER="$(id -un)"
 MACHINE_ID=""
 if command -v ioreg >/dev/null 2>&1; then
   MACHINE_ID="$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4; exit}')"
 fi
 
-python3 - "$payload" "$DEST" "$DRY" "$BASE" "$RUN_USER" "$MACHINE_ID" <<'PY'
+python3 - "$pick_payload" "$signature_payload" "$DEST" "$DRY" "$BASE" "$RUN_USER" "$MACHINE_ID" <<'PY'
 import json, os, subprocess, sys, urllib.parse, urllib.request
 
-payload, dest, dry, base, run_user, machine_id = sys.argv[1:]
+pick_payload, signature_payload, dest, dry, base, run_user, machine_id = sys.argv[1:]
 dry = dry == "1"
-data = json.loads(payload).get("data") or []
+pick_rows = json.loads(pick_payload).get("data") or []
+signature_rows = json.loads(signature_payload).get("data") or []
 key = os.environ["BRIDGE_API_KEY"]
 WHOLESALE_QUEUE = "Brother_HL_L3280CDW_series"
 WHOLESALE_USER = "rachaelsseafood"
@@ -90,40 +95,49 @@ if not dry and not on_wholesale_mac:
     )
     sys.exit(1)
 
-if not data:
-    print("No pending pick lists.")
+if not pick_rows and not signature_rows:
+    print("No pending pick lists or signature invoices.")
     sys.exit(0)
 
-for row in data:
-    pull_key = row.get("key")
-    account = row.get("account") or "pull"
-    print(f"{pull_key}  {account}  {row.get('reference') or ''}")
-    if dry:
-        continue
-    query = urllib.parse.urlencode({"format": "pdf", "key": pull_key})
-    req = urllib.request.Request(
-        f"{base}/api/wholesale-pull/sheets?{query}",
-        headers={"Authorization": f"Bearer {key}"},
-    )
-    with urllib.request.urlopen(req) as res:
-        pdf = res.read()
-    safe = "".join(ch if ch.isalnum() else "-" for ch in f"{account}-{pull_key}")[:80].strip("-")
-    path = os.path.join(dest, f"pick-list-{safe or 'wholesale'}.pdf")
-    tmp = path + ".partial"
-    with open(tmp, "wb") as fh:
-        fh.write(pdf)
-    os.replace(tmp, path)
-    print(f"saved {path}")
-    if printer:
-        subprocess.check_call(["lp", "-d", printer, path])
-        print(f"sent to {printer}")
-    mark = urllib.request.Request(
-        f"{base}/api/wholesale-pull/sheets",
-        data=json.dumps({"key": pull_key}).encode(),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(mark) as res:
-        res.read()
-    print(f"marked printed {pull_key}")
+def handle(rows, queue, prefix):
+    for row in rows:
+        pull_key = row.get("key")
+        account = row.get("account") or "pull"
+        print(f"{queue}  {pull_key}  {account}  {row.get('reference') or ''}")
+        if dry:
+            continue
+        query = {"format": "pdf", "key": pull_key}
+        if queue == "signature":
+            query["queue"] = "signature"
+        req = urllib.request.Request(
+            f"{base}/api/wholesale-pull/sheets?{urllib.parse.urlencode(query)}",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req) as res:
+            pdf = res.read()
+        safe = "".join(ch if ch.isalnum() else "-" for ch in f"{account}-{pull_key}")[:80].strip("-")
+        path = os.path.join(dest, f"{prefix}-{safe or 'wholesale'}.pdf")
+        tmp = path + ".partial"
+        with open(tmp, "wb") as fh:
+            fh.write(pdf)
+        os.replace(tmp, path)
+        print(f"saved {path}")
+        if printer:
+            subprocess.check_call(["lp", "-d", printer, path])
+            print(f"sent to {printer}")
+        body = {"key": pull_key}
+        if queue == "signature":
+            body["queue"] = "signature"
+        mark = urllib.request.Request(
+            f"{base}/api/wholesale-pull/sheets",
+            data=json.dumps(body).encode(),
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(mark) as res:
+            res.read()
+        print(f"marked printed {queue} {pull_key}")
+
+handle(pick_rows, "pick", "pick-list")
+handle(signature_rows, "signature", "SIGNATURE")
 PY

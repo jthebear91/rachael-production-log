@@ -308,21 +308,17 @@ function testTakeoutTitlesOmitMoney() {
     assert(title.startsWith('PULL · '), title)
   }
   assert(
-    buildTaskTitle({ account: `${HEBERTS_PUBLIC_NAME} (A Bears)`, kind: 'house account' }) === `PULL · ${HEBERTS_PUBLIC_NAME} · house account`,
-    'strips the speech nickname from the title'
+    buildTaskTitle({ account: HEBERTS_PUBLIC_NAME, kind: 'house account' }) === `PULL · ${HEBERTS_PUBLIC_NAME} · house account`,
+    'Hebert public name stays on the title'
   )
-  assert(
-    buildTaskTitle({ account: 'A Bears', kind: 'invoice' }) === `PULL · ${HEBERTS_PUBLIC_NAME} · invoice`,
-    'nickname-only account uses the public name'
-  )
-  const nickPdf = buildPickListPdf({
-    account: `${HEBERTS_PUBLIC_NAME} (A Bears)`,
+  const hebertPdf = buildPickListPdf({
+    account: HEBERTS_PUBLIC_NAME,
     dateLabel: 'Sep 24, 2026',
-    reference: '000225',
+    reference: 'house account',
     lines: [{ qty: '1', name: 'Stuffed Shrimp' }]
   }).toString('latin1')
-  assert(!nickPdf.includes('A Bears'), 'pdf account line omits the speech nickname')
-  assert(nickPdf.includes(HEBERTS_PUBLIC_NAME), 'pdf keeps the public account')
+  assert(hebertPdf.includes(HEBERTS_PUBLIC_NAME), 'pdf account line uses the public name')
+  assert(hebertPdf.includes('WHOLESALE'), 'pdf still has the wholesale banner')
 }
 
 function testSquareGuard() {

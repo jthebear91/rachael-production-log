@@ -3,20 +3,20 @@
 # Does not touch Maurice mint_handoff, LaunchAgents, or the nightly pick QR.
 # This script is not run in CI.
 #
-# Run this on the Trey laptop only:
-#   hostname Trey-s-A25
+# Run this on the wholesale Mac only:
 #   user rachaelsseafood
+#   machineId 1c85823c-2c30-4ffb-b905-0241b4daebfe
+# The Mac network name may show as Trey-s-A25. That is the network name, not the printer.
 # Do not run it on the Mac mini.
 #
-# Folder drop still works with WHOLESALE_PULL_PRINTER unset:
+# Folder drop (always, including when CUPS is skipped):
 #   ~/Documents/Wholesale Ordering/pull-sheets/
 #
-# Recommended CUPS queue (exact name) on that laptop:
+# Default CUPS queue (exact name). Model: Brother HL-L3280CDW.
 #   WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series
-# Model: Brother HL-L3280CDW
 # Device URI: dnssd://Brother%20HL-L3280CDW%20series._ipps._tcp.local./?uuid=e3248000-80ce-11db-8000-94ddf83ac040
-# Leave the variable unset for folder-drop only. Never send wholesale to the
-# Maurice cafe queue Brother_MFC_L5915DW_series.
+# Set WHOLESALE_PULL_PRINTER to empty for folder-drop only.
+# Never send wholesale to the Maurice cafe queue Brother_MFC_L5915DW_series.
 #
 #   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh --dry-run
 #   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
@@ -38,44 +38,56 @@ fi
 
 mkdir -p "$DEST"
 payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets" -H "Authorization: Bearer ${BRIDGE_API_KEY}")"
-HOST_SHORT="$(hostname -s 2>/dev/null || hostname)"
 RUN_USER="$(id -un)"
+MACHINE_ID=""
+if command -v ioreg >/dev/null 2>&1; then
+  MACHINE_ID="$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4; exit}')"
+fi
 
-python3 - "$payload" "$DEST" "$DRY" "$BASE" "$HOST_SHORT" "$RUN_USER" <<'PY'
+python3 - "$payload" "$DEST" "$DRY" "$BASE" "$RUN_USER" "$MACHINE_ID" <<'PY'
 import json, os, subprocess, sys, urllib.parse, urllib.request
 
-payload, dest, dry, base, host_short, run_user = sys.argv[1:]
+payload, dest, dry, base, run_user, machine_id = sys.argv[1:]
 dry = dry == "1"
 data = json.loads(payload).get("data") or []
 key = os.environ["BRIDGE_API_KEY"]
-# Recommended queue. Unset stays folder-drop only; do not fill this in when the env is empty.
-RECOMMENDED_QUEUE = "Brother_HL_L3280CDW_series"
+WHOLESALE_QUEUE = "Brother_HL_L3280CDW_series"
+WHOLESALE_USER = "rachaelsseafood"
+WHOLESALE_MACHINE_ID = "1c85823c-2c30-4ffb-b905-0241b4daebfe"
 MAURICE_CAFE_QUEUE = "Brother_MFC_L5915DW_series"
-printer = os.environ.get("WHOLESALE_PULL_PRINTER", "").strip()
-on_trey = host_short.lower().split(".")[0] == "trey-s-a25" and run_user == "rachaelsseafood"
+# Unset defaults to the wholesale queue. An explicit empty value is folder-drop only.
+if "WHOLESALE_PULL_PRINTER" not in os.environ:
+    printer = WHOLESALE_QUEUE
+else:
+    printer = os.environ.get("WHOLESALE_PULL_PRINTER", "").strip()
+on_wholesale_mac = (
+    run_user == WHOLESALE_USER
+    and machine_id.lower() == WHOLESALE_MACHINE_ID
+)
 
 if printer:
     folded = printer.lower()
     if printer == MAURICE_CAFE_QUEUE or "mfc_l5915" in folded or "mfc-l5915" in folded:
         print(
             "Refusing Maurice cafe queue Brother_MFC_L5915DW_series. "
-            "Wholesale CUPS target is Brother_HL_L3280CDW_series on the Trey laptop.",
+            "Wholesale CUPS target is Brother_HL_L3280CDW_series.",
             file=sys.stderr,
         )
         sys.exit(1)
-    if printer != RECOMMENDED_QUEUE:
+    if printer != WHOLESALE_QUEUE:
         print(
-            f"WHOLESALE_PULL_PRINTER must be {RECOMMENDED_QUEUE}, or unset for folder-drop only.",
+            f"WHOLESALE_PULL_PRINTER must be {WHOLESALE_QUEUE}, or empty for folder-drop only.",
             file=sys.stderr,
         )
         sys.exit(1)
-    if not on_trey:
-        print(
-            "Wholesale CUPS print runs only on the Trey laptop "
-            "(hostname Trey-s-A25, user rachaelsseafood), not the Mac mini.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+if not dry and not on_wholesale_mac:
+    print(
+        "This poll runs on the wholesale Mac only "
+        f"(user {WHOLESALE_USER}, machineId {WHOLESALE_MACHINE_ID}), not the Mac mini. "
+        "Nothing was printed or marked.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 if not data:
     print("No pending pick lists.")

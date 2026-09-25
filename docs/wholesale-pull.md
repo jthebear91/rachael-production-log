@@ -2,7 +2,7 @@
 
 When a wholesale Square invoice is unpaid, or a house-account receipt is completed at the wholesale location, this app adds a **Todoist Takeout** task and stores a pick-list PDF (quantity and item name only).
 
-It does **not** create tasks on the Package board. Package (`6cv69FHPW88HVjH8`) stays packaging and production work. Shopify → Takeout is a separate Zapier change; point that zap at the same Takeout project, priority p1, and the top of the board.
+It does **not** create tasks on the Package board. Package (`6cv69FHPW88HVjH8`) stays packaging and production work. Shopify → Takeout is a separate Zapier change; point that zap at the same Takeout project, priority p1, due date = America/Chicago today, and the top of the board.
 
 It does **not** print the Square invoice or house-account receipt, charge a card, or touch Maurice nightly pick QR, mint handoff, or inventory deduct.
 
@@ -14,11 +14,13 @@ Wholesale location id: `L6D106R4VNA72`
 
 ## What gets created
 
-Todoist task, priority **p1** (API priority `4`), inserted at the **top** of the leftmost Takeout column:
+Todoist task, priority **p1** (API priority `4`), due date **today in America/Chicago**, inserted at the **top** of the leftmost Takeout column:
 
 `PULL · {account} · {kind}`
 
-House-account receipts use kind `house account`. Unpaid invoices use the invoice number. The title never includes `$`, other currency symbols, or a formatted amount such as `$2,568`. A total may stay in the Todoist description or in Square. The description is the line list (qty and Square catalog name), a Square Dashboard link, and a `square-pull-key:` line. Prices and SKUs are not copied onto the pick list. A duplicate Square event for the same order or invoice updates nothing.
+House-account receipts use kind `house account`. Unpaid invoices use the invoice number. The title never includes `$`, other currency symbols, or a formatted amount such as `$2,568`. A total may stay in the Todoist description or in Square. The description is the line list (qty and Square catalog name), a Square Dashboard link, and a `square-pull-key:` line. Prices and SKUs are not copied onto the pick list.
+
+The create body sets an all-day `due_date` of `YYYY-MM-DD` for the board day: calendar today in America/Chicago, with no due time. That is the crew today filter. Priority p1 and top placement alone leave the task off that filter. The date is not the UTC date. A duplicate Square event for the same order or invoice updates nothing, including an existing due date.
 
 The Hebert's account on titles and pick-list account lines is Hebert's Specialty Meats (Heberts). A speech-only nickname is removed before either is written. Do not use that nickname in examples.
 
@@ -105,7 +107,7 @@ Create the Takeout task only after the preview looks right, and only with the fe
 node scripts/wholesale-pull-replay.cjs --heberts --apply
 ```
 
-Confirm in Todoist: Takeout project, title `PULL · …`, priority p1, at the top of the board. CI does not run this script and does not print.
+Confirm in Todoist: Takeout project, title `PULL · …`, priority p1, due date = board day (America/Chicago today), at the top of the board. CI does not run this script and does not print.
 
 ```bash
 curl -sS -X POST "https://rachael-production-log.vercel.app/api/wholesale-pull/replay" \

@@ -1,7 +1,9 @@
 'use strict'
 
 const fs = require('fs')
+const os = require('os')
 const path = require('path')
+const { spawnSync } = require('child_process')
 const { chicagoISODate } = require('../lib/chicago-time')
 const { buildPickListPdf } = require('../lib/pick-list-pdf')
 const { buildSignatureInvoicePdf } = require('../lib/signature-invoice-pdf')
@@ -1444,6 +1446,119 @@ function testPollerCopies() {
   assert(plist.includes('/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/POLL_KEY'), 'poll key lives outside Documents')
   assert(poll.includes('WHOLESALE_QUEUE = "Brother_HL_L3280CDW_series"'), 'poller queue constant')
   assert(!poll.includes('lp", "-d", "'), 'lp destination is the checked printer variable')
+  const realUuid = '9670DC09-2362-51D4-8476-38D5001BD500'
+  const registrationId = '1c85823c-2c30-4ffb-b905-0241b4daebfe'
+  assert(poll.includes(realUuid), 'poller guard uses the wholesale IOPlatformUUID')
+  assert(poll.includes('WHOLESALE_PULL_MAC_UUID'), 'poller honors the uuid override')
+  assert(poll.split(registrationId).length === 2, 'registration id remains only as a note in the poller')
+  assert(!poll.includes('No pending pick lists'), 'empty queue does not log')
+  const guardAt = poll.indexOf('Nothing was printed or marked.')
+  const curlAt = poll.indexOf('curl -fsS')
+  assert(guardAt !== -1 && guardAt < curlAt, 'guard runs before the network poll')
+  assert(plist.includes('<key>WHOLESALE_PULL_MAC_UUID</key>'), 'plist sets the uuid override')
+  assert(plist.includes(realUuid), 'plist uuid is the wholesale IOPlatformUUID')
+  assert(!plist.includes(registrationId), 'plist drops the registration id')
+  for (const rel of ['README.md', '.env.example', 'docs/wholesale-pull.md']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8')
+    assert(!text.includes(registrationId), `${rel} still cites the registration id`)
+    assert(text.includes(realUuid), `${rel} names the IOPlatformUUID`)
+  }
+}
+
+function testWholesaleMacGuard() {
+  const script = path.join(__dirname, 'wholesale-pull-mac-poll.sh')
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-mac-guard-'))
+  const marker = path.join(bin, 'curl-called')
+  const dest = path.join(bin, 'sheets')
+  const realUuid = '9670DC09-2362-51D4-8476-38D5001BD500'
+  fs.writeFileSync(path.join(bin, 'curl'), `#!/bin/sh
+printf '%s\\n' curl >> ${JSON.stringify(marker)}
+printf '%s\\n' '{"data":[]}'
+`, { mode: 0o755 })
+  fs.writeFileSync(path.join(bin, 'id'), `#!/bin/sh
+if [ "$1" = "-un" ]; then
+  printf '%s\\n' "$WP_TEST_USER"
+  exit 0
+fi
+exec /usr/bin/id "$@"
+`, { mode: 0o755 })
+
+  function writeIoreg(uuid) {
+    const ioreg = path.join(bin, 'ioreg')
+    if (uuid == null) {
+      if (fs.existsSync(ioreg)) fs.unlinkSync(ioreg)
+      return
+    }
+    fs.writeFileSync(ioreg, `#!/bin/sh
+printf '%s\\n' '    "IOPlatformUUID" = "${uuid}"'
+`, { mode: 0o755 })
+  }
+
+  function run({ uuid, user, uuidOverride, dry }) {
+    writeIoreg(uuid)
+    if (fs.existsSync(marker)) fs.unlinkSync(marker)
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: bin,
+      WHOLESALE_PULL_POLL_KEY: 'test-poll-key',
+      WHOLESALE_PULL_DEST: dest,
+      WHOLESALE_PULL_PRINTER: 'Brother_HL_L3280CDW_series',
+      WP_TEST_USER: user
+    }
+    delete env.WHOLESALE_PULL_MAC_UUID
+    delete env.WHOLESALE_PULL_POLL_KEY_FILE
+    delete env.BRIDGE_API_KEY
+    delete env.BRIDGE_API_KEY_FILE
+    if (uuidOverride !== undefined) env.WHOLESALE_PULL_MAC_UUID = uuidOverride
+    const result = spawnSync('bash', dry ? [script, '--dry-run'] : [script], { env, encoding: 'utf8' })
+    return {
+      status: result.status,
+      stdout: result.stdout || '',
+      stderr: result.stderr || '',
+      curled: fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n').length : 0,
+      error: result.error
+    }
+  }
+
+  try {
+    const wrong = run({ uuid: '1C85823C-2C30-4FFB-B905-0241B4DAEBFE', user: 'rachaelsseafood' })
+    assert(wrong.status === 1, `registration id must fail, status ${wrong.status} ${wrong.stderr} ${wrong.error}`)
+    assert(wrong.stderr.includes('Nothing was printed or marked.'), wrong.stderr)
+    assert(wrong.stderr.includes(realUuid), wrong.stderr)
+    assert(wrong.curled === 0, 'failed guard must not poll')
+    assert(!fs.existsSync(dest), 'failed guard must not create the drop folder')
+
+    const wrongUser = run({ uuid: realUuid, user: 'ubuntu' })
+    assert(wrongUser.status === 1 && wrongUser.curled === 0, `wrong user status=${wrongUser.status} curled=${wrongUser.curled} ${wrongUser.stderr}`)
+    assert(wrongUser.stderr.includes('Nothing was printed or marked.'), wrongUser.stderr)
+
+    const noIoreg = run({ uuid: null, user: 'rachaelsseafood' })
+    assert(noIoreg.status === 1 && noIoreg.curled === 0, `missing ioreg fails closed ${noIoreg.status} curled=${noIoreg.curled} ${noIoreg.stderr}`)
+
+    const match = run({ uuid: realUuid, user: 'rachaelsseafood' })
+    assert(match.status === 0, `matching mac empty queue status ${match.status} stderr=${match.stderr} stdout=${match.stdout} ${match.error}`)
+    assert(match.stderr === '', `empty queue must not write stderr: ${match.stderr}`)
+    assert(match.stdout === '', `empty queue must be quiet: ${match.stdout}`)
+    assert(match.curled === 2, `matching mac polls both queues, curled=${match.curled}`)
+
+    const folded = run({ uuid: realUuid.toLowerCase(), user: 'rachaelsseafood' })
+    assert(folded.status === 0 && folded.stderr === '' && folded.stdout === '' && folded.curled === 2, `case-insensitive match ${folded.status} ${folded.stderr} curled=${folded.curled}`)
+
+    const override = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'
+    const overridden = run({ uuid: override.toLowerCase(), user: 'rachaelsseafood', uuidOverride: override })
+    assert(overridden.status === 0 && overridden.stderr === '' && overridden.curled === 2, `override match ${overridden.status} ${overridden.stderr} curled=${overridden.curled}`)
+
+    const overrideMiss = run({ uuid: realUuid, user: 'rachaelsseafood', uuidOverride: override })
+    assert(overrideMiss.status === 1 && overrideMiss.curled === 0, `override mismatch must not poll ${overrideMiss.status} curled=${overrideMiss.curled} ${overrideMiss.stderr}`)
+    assert(overrideMiss.stderr.includes(override), overrideMiss.stderr)
+    assert(overrideMiss.stderr.trim().split('\n').length === 1, `guard stderr should be one line: ${overrideMiss.stderr}`)
+
+    const dry = run({ uuid: 'not-the-mac', user: 'someoneelse', dry: true })
+    assert(dry.status === 0 && dry.curled === 2 && dry.stderr === '' && dry.stdout === '', `dry-run lists without printing ${dry.status} curled=${dry.curled} stderr=${dry.stderr} stdout=${dry.stdout}`)
+  } finally {
+    fs.rmSync(bin, { recursive: true, force: true })
+  }
 }
 
 function captureRes() {
@@ -1532,6 +1647,7 @@ async function main() {
   await testStoreUpdateMissFailsClosed()
   await testTodoistOAuthFlow()
   testPollerCopies()
+  testWholesaleMacGuard()
   await testWholesalePullPollAuth()
   console.log('verify-wholesale-pull: ok')
 }

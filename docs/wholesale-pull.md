@@ -166,7 +166,7 @@ The LaunchAgent points `WHOLESALE_PULL_POLL_KEY_FILE` at the Application Support
 
 Pick lists are `pick-list-*.pdf` and print **1** copy. Signature invoices are `SIGNATURE-*.pdf` and print **2** copies (`lp -n 2`). Both use only `Brother_HL_L3280CDW_series`.
 
-Run the poll on the wholesale Mac: user `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`. The Mac network name may show as `Trey-s-A25`. That is the network name only. Do not run this script on the Mac mini.
+Run the poll on the wholesale Mac: user `rachaelsseafood`, IOPlatformUUID `9670DC09-2362-51D4-8476-38D5001BD500` (`ioreg -rd1 -c IOPlatformExpertDevice`, compared case-insensitively). `WHOLESALE_PULL_MAC_UUID` overrides that expected value. The guard runs before any network poll and exits without printing or marking on any other machine. An empty queue exits 0 with no output. The Mac network name may show as `Trey-s-A25`. That is the network name only. Do not run this script on the Mac mini.
 
 Default:
 
@@ -181,9 +181,9 @@ WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series
 WHOLESALE_PULL_POLL_KEY=... bash scripts/wholesale-pull-mac-poll.sh
 ```
 
-An empty `WHOLESALE_PULL_PRINTER` skips CUPS and still writes the PDF. The default sends the saved file to `Brother_HL_L3280CDW_series` only when the user and machine id match the wholesale Mac. Any other queue, including MFC-L5915DW, makes the script exit before `lp`. The script does not call the Maurice mint handoff.
+An empty `WHOLESALE_PULL_PRINTER` skips CUPS and still writes the PDF. The default sends the saved file to `Brother_HL_L3280CDW_series` only when the user and IOPlatformUUID match the wholesale Mac. Any other queue, including MFC-L5915DW, makes the script exit before `lp`. The script does not call the Maurice mint handoff.
 
-Install the poll on the wholesale Mac with `scripts/com.rachaelsseafood.wholesale-pull-poll.plist` (see the comment in that file). It runs every 30 seconds as user `rachaelsseafood` and reads `WHOLESALE_PULL_POLL_KEY` from a mode `600` file outside `~/Documents`, not from the plist.
+Install the poll on the wholesale Mac with `scripts/com.rachaelsseafood.wholesale-pull-poll.plist` (see the comment in that file). It runs every 30 seconds as user `rachaelsseafood` and reads `WHOLESALE_PULL_POLL_KEY` from a mode `600` file outside `~/Documents`, not from the plist. launchd runs the script copied into Application Support, so replace that copy when the guard changes.
 
 `GET /api/wholesale-pull/sheets` lists unprinted pick lists. `GET /api/wholesale-pull/sheets?format=pdf&key=order:…` downloads one. `POST /api/wholesale-pull/sheets` with `{ "key": "order:…" }` marks the pick list printed.
 
@@ -234,7 +234,7 @@ Install the poll on the wholesale Mac with `scripts/com.rachaelsseafood.wholesal
 2. **Token scopes** (read only). The wholesale token needs `INVOICES_READ`, `ORDERS_READ`, `PAYMENTS_READ`, `CUSTOMERS_READ`, and `ITEMS_READ`. It must not be used to charge cards. This feature never calls Payments create or `inventory.batchChange`.
 3. **Supabase SQL** `supabase/wholesale_pulls.sql` has to be applied once or PDFs are not queued for the Mac.
 4. **Feature flag** stays off until the three items above are done. Then set `WHOLESALE_PULL_ENABLED=1` and redeploy.
-5. **CUPS LaunchAgent** is installed on the wholesale Mac from `scripts/com.rachaelsseafood.wholesale-pull-poll.plist`, not started by Vercel. User `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`. The network name may be `Trey-s-A25`; that is not the printer. The only queue is `Brother_HL_L3280CDW_series` (Brother HL-L3280CDW). Signature invoices print 2 copies. Pick lists print 1. MFC-L5915DW is Maurice-only. The agent's files stay under `~/Library/Application Support/RachaelsWholesalePull/` because launchd cannot use `~/Documents`. Set `WHOLESALE_PULL_POLL_KEY` on Vercel and store that value in `POLL_KEY` (mode 600) or `/Users/Shared/RachaelsWholesalePull/poll.key`. Do not put `BRIDGE_API_KEY` on the Mac.
+5. **CUPS LaunchAgent** is installed on the wholesale Mac from `scripts/com.rachaelsseafood.wholesale-pull-poll.plist`, not started by Vercel. User `rachaelsseafood`, IOPlatformUUID `9670DC09-2362-51D4-8476-38D5001BD500`. The network name may be `Trey-s-A25`; that is not the printer. The only queue is `Brother_HL_L3280CDW_series` (Brother HL-L3280CDW). Signature invoices print 2 copies. Pick lists print 1. MFC-L5915DW is Maurice-only. The agent's files stay under `~/Library/Application Support/RachaelsWholesalePull/` because launchd cannot use `~/Documents`. Set `WHOLESALE_PULL_POLL_KEY` on Vercel and store that value in `POLL_KEY` (mode 600) or `/Users/Shared/RachaelsWholesalePull/poll.key`. Do not put `BRIDGE_API_KEY` on the Mac.
 6. **Todoist webhook** is not created by this repo. Subscribe `item:completed` to the callback URL above, set `TODOIST_WEBHOOK_SECRET` and `TODOIST_CLIENT_ID`, set the App Console redirect URL, then open `GET /api/wholesale-pull/todoist-oauth` while logged into the Takeout account. Todoist does not deliver app webhooks for a user until that OAuth token exchange finishes. The token is not stored.
 7. **Signature columns.** Re-run `supabase/wholesale_pulls.sql` so `signature_status` and `todoist_task_id` exist. Without that, a completed task cannot be queued for the Mac.
 8. **Hebert's practice task** waits on Jordan. Replay with `apply: false` first. `--apply` creates the Takeout task. The signature PDF is queued only after that task is checked off, and only the Mac poll sends it to the printer.

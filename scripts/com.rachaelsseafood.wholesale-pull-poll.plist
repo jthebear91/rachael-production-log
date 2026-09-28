@@ -2,7 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Wholesale pull poller. Wholesale Mac only (user rachaelsseafood,
-  machineId 1c85823c-2c30-4ffb-b905-0241b4daebfe). Never the Mac mini.
+  IOPlatformUUID 9670DC09-2362-51D4-8476-38D5001BD500). Never the Mac mini.
+  WHOLESALE_PULL_MAC_UUID overrides that expected hardware UUID.
   Install:
     mkdir -p "$HOME/Library/Application Support/RachaelsWholesalePull/pull-sheets" \
              "$HOME/Library/Application Support/RachaelsWholesalePull/logs"
@@ -33,6 +34,8 @@
     <string>/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/pull-sheets</string>
     <key>WHOLESALE_PULL_PRINTER</key>
     <string>Brother_HL_L3280CDW_series</string>
+    <key>WHOLESALE_PULL_MAC_UUID</key>
+    <string>9670DC09-2362-51D4-8476-38D5001BD500</string>
     <key>PATH</key>
     <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>

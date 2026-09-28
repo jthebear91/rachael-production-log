@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Wholesale pull poller. Wholesale Mac only (user rachaelsseafood,
+  machineId 1c85823c-2c30-4ffb-b905-0241b4daebfe). Never the Mac mini.
+  Install:
+    mkdir -p "$HOME/Library/Application Support/RachaelsWholesalePull/pull-sheets" \
+             "$HOME/Library/Application Support/RachaelsWholesalePull/logs"
+    cp scripts/wholesale-pull-mac-poll.sh "$HOME/Library/Application Support/RachaelsWholesalePull/"
+    printf '%s' "<BRIDGE_API_KEY>" > "$HOME/Library/Application Support/RachaelsWholesalePull/BRIDGE_API_KEY"
+    chmod 600 "$HOME/Library/Application Support/RachaelsWholesalePull/BRIDGE_API_KEY"
+    cp scripts/com.rachaelsseafood.wholesale-pull-poll.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.rachaelsseafood.wholesale-pull-poll.plist
+  Everything lives under ~/Library/Application Support so TCC never blocks it.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rachaelsseafood.wholesale-pull-poll</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/wholesale-pull-mac-poll.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BRIDGE_API_KEY_FILE</key>
+    <string>/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/BRIDGE_API_KEY</string>
+    <key>WHOLESALE_PULL_DEST</key>
+    <string>/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/pull-sheets</string>
+    <key>WHOLESALE_PULL_PRINTER</key>
+    <string>Brother_HL_L3280CDW_series</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/logs/poll.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/logs/poll.err.log</string>
+</dict>
+</plist>

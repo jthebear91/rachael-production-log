@@ -9,8 +9,11 @@
 # The Mac network name may show as Trey-s-A25. That is the network name, not the printer.
 # Do not run it on the Mac mini.
 #
-# Folder drop (always, including when CUPS is skipped):
-#   ~/Documents/Wholesale Ordering/pull-sheets/
+# Folder drop:
+#   Manual Terminal runs default to ~/Documents/Wholesale Ordering/pull-sheets/
+#   LaunchAgents cannot read or write ~/Documents (macOS TCC). The LaunchAgent
+#   sets WHOLESALE_PULL_DEST under ~/Library/Application Support/RachaelsWholesalePull/
+#   The bridge key is read from BRIDGE_API_KEY_FILE (mode 0600), not from the plist.
 #
 # Pick lists are saved as pick-list-*.pdf.
 # Signature invoices (Takeout task checked off) are saved as SIGNATURE-*.pdf.
@@ -29,12 +32,22 @@ set -euo pipefail
 
 BASE="${APP_BASE_URL:-https://rachael-production-log.vercel.app}"
 BASE="${BASE%/}"
-DEST="${HOME}/Documents/Wholesale Ordering/pull-sheets"
+# LaunchAgents cannot read or write ~/Documents on macOS (TCC privacy controls
+# return "Operation not permitted"; this already broke the Maurice mint worker).
+# The LaunchAgent sets WHOLESALE_PULL_DEST to a folder outside ~/Documents, e.g.
+#   ~/Library/Application Support/RachaelsWholesalePull/pull-sheets
+# Manual runs from Terminal keep the ~/Documents drop folder by default.
+DEST="${WHOLESALE_PULL_DEST:-${HOME}/Documents/Wholesale Ordering/pull-sheets}"
 DRY=0
 if [[ "${1:-}" == "--dry-run" ]]; then
   DRY=1
 fi
 
+# LaunchAgent reads the key from a 0600 file instead of the plist.
+if [[ -z "${BRIDGE_API_KEY:-}" && -n "${BRIDGE_API_KEY_FILE:-}" && -r "${BRIDGE_API_KEY_FILE}" ]]; then
+  BRIDGE_API_KEY="$(tr -d '[:space:]' < "${BRIDGE_API_KEY_FILE}")"
+  export BRIDGE_API_KEY
+fi
 if [[ -z "${BRIDGE_API_KEY:-}" ]]; then
   echo "BRIDGE_API_KEY is not set" >&2
   exit 1
@@ -58,6 +71,9 @@ pick_rows = json.loads(pick_payload).get("data") or []
 signature_rows = json.loads(signature_payload).get("data") or []
 key = os.environ["BRIDGE_API_KEY"]
 WHOLESALE_QUEUE = "Brother_HL_L3280CDW_series"
+# Jordan 2026-09-28: every SIGNATURE invoice prints 2 copies on the Brother HL
+# (one for the customer to sign and keep, one for us). Pick lists stay at 1.
+COPIES = {"pick": 1, "signature": 2}
 WHOLESALE_USER = "rachaelsseafood"
 WHOLESALE_MACHINE_ID = "1c85823c-2c30-4ffb-b905-0241b4daebfe"
 # Unset defaults to the wholesale queue. An explicit empty value is folder-drop only.
@@ -123,8 +139,9 @@ def handle(rows, queue, prefix):
         os.replace(tmp, path)
         print(f"saved {path}")
         if printer:
-            subprocess.check_call(["lp", "-d", printer, path])
-            print(f"sent to {printer}")
+            copies = COPIES.get(queue, 1)
+            subprocess.check_call(["lp", "-n", str(copies), "-d", printer, path])
+            print(f"sent to {printer} copies={copies}")
         body = {"key": pull_key}
         if queue == "signature":
             body["queue"] = "signature"

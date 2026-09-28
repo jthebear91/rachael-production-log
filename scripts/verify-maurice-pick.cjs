@@ -30,7 +30,7 @@ const {
 } = require('../lib/maurice-pick')
 const { loadPickSheet, renderPickSheet } = require('../lib/pick-sheet')
 const { priorMonSat } = require('../lib/chicago-time')
-const { createMauriceWeekInvoice } = require('../lib/maurice-week')
+const { WEEK_INVOICE_DUE_DAYS, createMauriceWeekInvoice } = require('../lib/maurice-week')
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg)
@@ -609,7 +609,7 @@ async function testDailySendNeverInvoices(createUnpaidInvoice) {
   assert(saved.pricedLines[0].qtySent === '2' && saved.pricedLines[0].lineTotalCents === 2000, 'week log stores the priced line')
 }
 
-async function sendLivePick(store, env, date, lines, qtyById, createUnpaidInvoice) {
+async function sendLivePick(store, env, date, lines, qtyById, createUnpaidInvoice, now) {
   const created = await createMauricePick({
     env,
     store,
@@ -618,6 +618,7 @@ async function sendLivePick(store, env, date, lines, qtyById, createUnpaidInvoic
   const square = fakeSquare()
   await sendMauricePick({
     ...sendDeps(store, square, env),
+    ...(now ? { now } : {}),
     createUnpaidInvoice,
     token: created.token,
     body: qtyById ? { lines: qtyById } : undefined
@@ -672,6 +673,8 @@ async function testWeekInvoice(createUnpaidInvoice) {
   const invoice = square.calls.find(call => call.path === '/invoices').body
   assert(invoice.invoice.delivery_method === 'SHARE_MANUALLY', 'manual share')
   assert(invoice.invoice.payment_requests[0].automatic_payment_source === 'NONE', 'no auto charge')
+  assert(WEEK_INVOICE_DUE_DAYS === 14, 'week invoice due offset is locked')
+  assert(invoice.invoice.payment_requests[0].due_date === '2026-10-12', invoice.invoice.payment_requests[0].due_date)
   assert(invoice.invoice.primary_recipient.customer_id === DEFAULT_MAURICE_CUSTOMER_ID, 'invoice customer')
   const before = square.calls.length
   const again = await createMauriceWeekInvoice(deps)
@@ -695,6 +698,51 @@ async function testWeekInvoice(createUnpaidInvoice) {
     rejected = err.status === 400
   }
   assert(rejected, 'weekStart must be a Monday')
+}
+
+async function testWeekInvoiceBillsLatestSendPerDay(createUnpaidInvoice) {
+  const store = createMemoryPickStore()
+  const live = liveEnv({ APP_BASE_URL: 'https://pick.example' })
+  const dry = { APP_BASE_URL: 'https://pick.example' }
+  const early = () => new Date('2026-09-21T15:00:00.000Z')
+  const remint = () => new Date('2026-09-21T20:00:00.000Z')
+  const laterDry = () => new Date('2026-09-21T22:00:00.000Z')
+  await sendLivePick(store, live, '2026-09-21', [
+    { sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 4 }
+  ], [
+    { sellableCatalogObjectId: 'VAR_A', qty: 2 }
+  ], createUnpaidInvoice, early)
+  await sendLivePick(store, live, '2026-09-21', [
+    { sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 7 }
+  ], null, createUnpaidInvoice, remint)
+  await sendLivePick(store, dry, '2026-09-21', [
+    { sellableCatalogObjectId: 'VAR_A', name: 'Shrimp', qtyOrdered: 9 }
+  ], null, createUnpaidInvoice, laterDry)
+  await sendLivePick(store, live, '2026-09-26', [
+    { sellableCatalogObjectId: 'VAR_B', name: 'Gumbo', qtyOrdered: 1 }
+  ], null, createUnpaidInvoice)
+
+  const square = fakeSquare()
+  const rolled = await createMauriceWeekInvoice({
+    store,
+    env: live,
+    now: () => new Date('2026-09-28T16:00:00.000Z'),
+    createUnpaidInvoice,
+    resolveAccount: () => wholesaleAccount(),
+    squareFetch: square.squareFetch
+  })
+  assert(rolled.pickCount === 2 && rolled.dryRunSkipped === 1, `counts ${rolled.pickCount} skipped ${rolled.dryRunSkipped}`)
+  assert(rolled.loggedTotal === '80.00', rolled.loggedTotal)
+  const qtyById = Object.fromEntries(rolled.lines.map(line => [line.sellableCatalogObjectId, line.qty]))
+  assert(qtyById.VAR_A === '7' && qtyById.VAR_B === '1', JSON.stringify(qtyById))
+  const order = square.calls.find(call => call.path === '/orders').body
+  assert(order.idempotency_key === 'mp-week-2026-09-21', order.idempotency_key)
+  const invoice = square.calls.find(call => call.path === '/invoices').body
+  assert(invoice.idempotency_key === 'mp-week-2026-09-21:invoice', invoice.idempotency_key)
+  assert(invoice.invoice.payment_requests[0].due_date === '2026-10-12', invoice.invoice.payment_requests[0].due_date)
+  assert(invoice.invoice.delivery_method === 'SHARE_MANUALLY', 'manual share stays')
+  const orderQty = Object.fromEntries(order.order.line_items.map(line => [line.catalog_object_id, line.quantity]))
+  assert(orderQty.VAR_A === '7' && orderQty.VAR_B === '1', JSON.stringify(orderQty))
 }
 
 async function testCountingSku(createUnpaidInvoice) {
@@ -765,6 +813,10 @@ function testSourceShape() {
   assert(week.includes('authorizeBridge'), 'monday rollup uses the bridge key')
   assert(!week.includes('authorizePickMint') && !week.includes('PICK_MINT_API_KEY'), 'monday rollup rejects the mint-only key')
   assert(!week.includes('SQUARE_LAFAYETTE'), 'monday rollup does not use the Lafayette account')
+  const weekLib = fs.readFileSync(path.join(root, 'lib/maurice-week.js'), 'utf8')
+  assert(weekLib.includes('const WEEK_INVOICE_DUE_DAYS = 14'), 'due date locked at 14 days')
+  assert(weekLib.includes('dueDays: WEEK_INVOICE_DUE_DAYS'), 'rollup passes the locked due days')
+  assert(!weekLib.includes('dueDays: 0'), 'rollup is not due the same day')
   const create = fs.readFileSync(path.join(root, 'pages/api/pick/maurice-restock/create.js'), 'utf8')
   assert(create.includes('authorizePickMint'), 'create accepts the mint-only key')
   assert(!create.includes('authorizeBridge'), 'create does not use the full bridge gate')
@@ -892,6 +944,7 @@ async function main() {
   await testLockedRetry(createUnpaidInvoice)
   await testDailySendNeverInvoices(createUnpaidInvoice)
   await testWeekInvoice(createUnpaidInvoice)
+  await testWeekInvoiceBillsLatestSendPerDay(createUnpaidInvoice)
   await testCountingSku(createUnpaidInvoice)
   testSourceShape()
   console.log('verify-maurice-pick: ok')

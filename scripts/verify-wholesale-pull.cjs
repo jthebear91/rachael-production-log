@@ -19,8 +19,11 @@ const {
   handlePullSheets,
   handleReplay,
   handleSquareWebhook,
-  handleTodoistWebhook
+  handleTodoistWebhook,
+  createSupabasePullStore,
+  EXCLUDED_CUSTOMER_IDS
 } = require('../lib/wholesale-pull')
+const { handleTodoistOAuth } = require('../lib/todoist-oauth')
 
 const LOCATION = 'L6D106R4VNA72'
 const TAKEOUT = '6cv69FrQF2QcqVqw'
@@ -96,7 +99,7 @@ function squareFetchFor(world) {
     if (squarePath.startsWith('/payments/PAY_CARD')) return { payment: world.cardPayment }
     if (squarePath.startsWith('/payments/')) return { payment: world.payment }
     if (squarePath.startsWith('/customers/')) {
-      return { customer: { id: 'CUST_HEBERT', company_name: "Hebert's Maurice" } }
+      return { customer: world.customer || { id: 'CUST_HEBERT', company_name: "Hebert's Maurice" } }
     }
     if (squarePath.includes('VAR_NONAME')) {
       return {
@@ -1112,12 +1115,398 @@ function testSourceShape() {
   assert(docs.includes('Jordan lock 2026-09-25'), 'docs cite the lock')
   const replay = fs.readFileSync(path.join(root, 'pages/api/wholesale-pull/replay.js'), 'utf8')
   assert(replay.includes('withBridgePost'), 'replay is bridge gated')
+  assert(!replay.includes('WHOLESALE_PULL_POLL_KEY'), 'replay does not accept the poll key')
+  const sheetsRoute = fs.readFileSync(path.join(root, 'pages/api/wholesale-pull/sheets.js'), 'utf8')
+  assert(sheetsRoute.includes('authorizeWholesalePullPoll'), 'sheets accept the poll key')
+  assert(!sheetsRoute.includes('authorizeBridge'), 'sheets are not bridge-only')
+  const authSrc = fs.readFileSync(path.join(root, 'lib/bridge-auth.js'), 'utf8')
+  const bridgeFn = authSrc.slice(authSrc.indexOf('export function authorizeBridge'), authSrc.indexOf('export function authorizePickMint'))
+  const isBridgeFn = authSrc.slice(authSrc.indexOf('export function isBridgeAuthorized'), authSrc.indexOf('export function authorizeBridge'))
+  assert(!bridgeFn.includes('WHOLESALE_PULL_POLL_KEY'), 'bridge auth ignores the poll key')
+  assert(!isBridgeFn.includes('WHOLESALE_PULL_POLL_KEY'), 'sales bridge check ignores the poll key')
   const maurice = fs.readFileSync(path.join(root, 'pages/api/pick/maurice-restock/create.js'), 'utf8')
   assert(maurice.includes('authorizePickMint'), 'maurice mint route still mint-gated')
   assert(!maurice.includes('wholesale-pull'), 'maurice route does not import wholesale pull')
   const replayScript = fs.readFileSync(path.join(root, 'scripts/wholesale-pull-replay.cjs'), 'utf8')
   assert(replayScript.includes('gcEI0dtLc3OaueVCwjKKet9vxZRZY'), 'replay docs the practice order')
   assert(!replayScript.includes('lp ') && !replayScript.includes('lpr'), 'replay script does not print')
+}
+
+const LAFAYETTE = 'FY8QC4GPN38Q30MJY8QXSGNDFC'
+const MAURICE_CAFE = 'TQ8JFGXMZGTY8JNKCY1TV72618'
+const NUNUS_YV = 'GFSB4VQXTKPQ84TQCGBTRJMRWM'
+const NUNUS_MAURICE = '59K0PJZG791Z0DG3GAFMX0SEPM'
+
+async function testExcludedCustomerCreatesNothing() {
+  assert(EXCLUDED_CUSTOMER_IDS[LAFAYETTE], 'lafayette is excluded by default')
+  assert(EXCLUDED_CUSTOMER_IDS[MAURICE_CAFE] === "Rachael's Cafe Maurice", 'maurice cafe is excluded by default')
+  const store = memoryStore()
+  const todoist = todoistFake()
+  const squareWorld = world()
+  squareWorld.invoice = { ...invoiceFixture(), primary_recipient: { customer_id: LAFAYETTE } }
+  squareWorld.order = orderFixture({ customer_id: LAFAYETTE })
+  const res = await postEvent(baseEnv(), store, todoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, squareWorld)
+  assert(res.json.skipped === 'excluded_customer', JSON.stringify(res.json))
+  assert(todoist.created.length === 0, 'excluded customer creates no task')
+  assert(store.rows.length === 0, 'excluded customer stores no pick pdf')
+
+  const houseWorld = world()
+  houseWorld.payment = { ...houseWorld.payment, customer_id: LAFAYETTE }
+  const house = await postEvent(baseEnv(), memoryStore(), todoist, {
+    type: 'payment.updated',
+    data: { object: { payment: { id: 'PAY_HEBERT' } } }
+  }, houseWorld)
+  assert(house.json.skipped === 'excluded_customer', JSON.stringify(house.json))
+
+  const envWorld = world()
+  const viaEnv = await postEvent(baseEnv({ WHOLESALE_PULL_EXCLUDED_CUSTOMER_IDS: 'OTHER_ID, CUST_HEBERT' }), memoryStore(), todoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, envWorld)
+  assert(viaEnv.json.skipped === 'excluded_customer', 'env list extends exclusions')
+  assert(todoist.created.length === 0, 'still nothing created')
+
+  const orderWorld = world()
+  orderWorld.order = orderFixture({
+    customer_id: LAFAYETTE,
+    tenders: [{ type: 'OTHER', note: 'House Account' }]
+  })
+  const orderRes = await postEvent(baseEnv(), memoryStore(), todoist, {
+    type: 'order.updated',
+    data: { object: { order: { id: 'ORDER_HEBERT' } } }
+  }, orderWorld)
+  assert(orderRes.json.skipped === 'excluded_customer', JSON.stringify(orderRes.json))
+  assert(todoist.created.length === 0, 'excluded order creates no task')
+
+  const mauriceWorld = world()
+  mauriceWorld.invoice = { ...invoiceFixture(), primary_recipient: { customer_id: MAURICE_CAFE } }
+  mauriceWorld.order = orderFixture({ customer_id: MAURICE_CAFE })
+  const mauriceStore = memoryStore()
+  const maurice = await postEvent(baseEnv(), mauriceStore, todoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, mauriceWorld)
+  assert(maurice.json.skipped === 'excluded_customer', JSON.stringify(maurice.json))
+  assert(mauriceStore.rows.length === 0, 'maurice rollup stores no pick pdf')
+  assert(todoist.created.length === 0, 'maurice rollup creates no takeout task')
+
+  const overrideWorld = world()
+  overrideWorld.invoice = { ...invoiceFixture(), primary_recipient: { customer_id: 'MAURICE_OVERRIDE' } }
+  overrideWorld.order = orderFixture({ customer_id: 'MAURICE_OVERRIDE' })
+  const override = await postEvent(baseEnv({ SQUARE_MAURICE_CUSTOMER_ID: 'MAURICE_OVERRIDE' }), memoryStore(), todoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, overrideWorld)
+  assert(override.json.skipped === 'excluded_customer', JSON.stringify(override.json))
+  assert(todoist.created.length === 0, 'maurice customer override creates no task')
+}
+
+async function testCanonicalAccountNames() {
+  const todoist = todoistFake()
+  const squareWorld = world()
+  squareWorld.invoice = { ...invoiceFixture(), invoice_number: '000227', primary_recipient: { customer_id: NUNUS_YV } }
+  squareWorld.order = orderFixture({ customer_id: NUNUS_YV })
+  const res = await postEvent(baseEnv(), memoryStore(), todoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, squareWorld)
+  assert(res.json.created === true, JSON.stringify(res.json))
+  assert(todoist.created[0].content === "PULL · Nunu's Youngsville · 000227", todoist.created[0].content)
+  assert(!todoist.created[0].content.includes('$'), 'no dollars in canonical title')
+
+  const envTodoist = todoistFake()
+  const env = baseEnv({
+    WHOLESALE_PULL_ACCOUNT_NAMES_JSON: JSON.stringify({ CUST_HEBERT: "Hebert's Specialty Meats (A Bears) $20" })
+  })
+  const heb = await postEvent(env, memoryStore(), envTodoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, world())
+  assert(heb.json.created === true, JSON.stringify(heb.json))
+  assert(envTodoist.created[0].content === "PULL · Hebert's Specialty Meats · 1042", envTodoist.created[0].content)
+  assert(!/a bears/i.test(envTodoist.created[0].content), 'speech nickname stays off the title')
+  assert(!envTodoist.created[0].content.includes('$'), 'mapped dollars stay off the title')
+
+  const mauriceTodoist = todoistFake()
+  const mauriceWorld = world()
+  mauriceWorld.invoice = {
+    ...invoiceFixture(),
+    invoice_number: '000310',
+    primary_recipient: { customer_id: 'CONTACT_ONLY' }
+  }
+  mauriceWorld.order = orderFixture({ customer_id: NUNUS_MAURICE })
+  mauriceWorld.customer = { id: 'CONTACT_ONLY', company_name: 'Nunus' }
+  const maurice = await postEvent(baseEnv(), memoryStore(), mauriceTodoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, mauriceWorld)
+  assert(maurice.json.created === true, JSON.stringify(maurice.json))
+  assert(mauriceTodoist.created[0].content === "PULL · Nunu's Maurice · 000310", mauriceTodoist.created[0].content)
+  assert(!mauriceTodoist.created[0].content.includes('Nunus'), 'square spelling is not the title')
+  assert(!mauriceTodoist.created[0].content.includes('$'), 'maurice title has no dollars')
+
+  const hebertsTodoist = todoistFake()
+  const hebertsWorld = world()
+  hebertsWorld.invoice = { ...invoiceFixture(), primary_recipient: { customer_id: 'HEBERTS_SQUARE' } }
+  hebertsWorld.order = orderFixture({ customer_id: 'HEBERTS_SQUARE' })
+  hebertsWorld.customer = { id: 'HEBERTS_SQUARE', company_name: 'Heberts' }
+  const plain = await postEvent(baseEnv(), memoryStore(), hebertsTodoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, hebertsWorld)
+  assert(plain.json.created === true, JSON.stringify(plain.json))
+  assert(hebertsTodoist.created[0].content === 'PULL · Heberts · 1042', hebertsTodoist.created[0].content)
+  assert(!/a bears/i.test(hebertsTodoist.created[0].content), 'unmapped Heberts has no speech nickname')
+
+  const badMapTodoist = todoistFake()
+  const badMapWorld = world()
+  badMapWorld.invoice = { ...invoiceFixture(), primary_recipient: { customer_id: NUNUS_YV } }
+  badMapWorld.order = orderFixture({ customer_id: NUNUS_YV })
+  badMapWorld.customer = { id: NUNUS_YV, company_name: 'Nunus Youngsville' }
+  const badMap = await postEvent(baseEnv({
+    WHOLESALE_PULL_ACCOUNT_NAMES_JSON: JSON.stringify({ [NUNUS_YV]: '(A Bears)', CUST_HEBERT: { name: 'nope' } })
+  }), memoryStore(), badMapTodoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, badMapWorld)
+  assert(badMap.json.created === true, JSON.stringify(badMap.json))
+  assert(badMapTodoist.created[0].content === 'PULL · Nunus Youngsville · 1042', badMapTodoist.created[0].content)
+  assert(!/a bears/i.test(badMapTodoist.created[0].content), 'nickname-only map is not a title')
+  assert(!badMapTodoist.created[0].content.includes(HEBERTS_PUBLIC_NAME), 'nickname-only map is not rewritten to Heberts')
+}
+
+async function testSupabaseStoreFilters() {
+  const calls = []
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url, method: options.method || 'GET' })
+    return { status: 200, ok: true, text: async () => '[{"idempotency_key":"order:ABC"}]' }
+  }
+  const store = createSupabasePullStore({ NEXT_PUBLIC_SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_KEY: 'k' }, fetchImpl)
+  await store.update('order:ABC', { status: 'ready' })
+  await store.get('order:ABC')
+  await store.findByTodoistTaskId('6hfMWj4XJc897Rrw')
+  await store.queueSignature('order:ABC', { signature_status: 'ready' })
+  await store.markSignaturePrinted('order:ABC', new Date())
+  await store.markPrinted('order:ABC', new Date())
+  for (const call of calls) {
+    const query = decodeURIComponent(new URL(call.url).search)
+    assert(!/=eq\."/.test(query), `plain eq filter must not be quoted: ${query}`)
+  }
+  assert(decodeURIComponent(calls[0].url).includes('idempotency_key=eq.order:ABC'), calls[0].url)
+  assert(decodeURIComponent(calls[2].url).includes('todoist_task_id=eq.6hfMWj4XJc897Rrw'), calls[2].url)
+  calls.length = 0
+  await store.find({ idempotencyKey: 'order:ABC', orderId: 'ABC' })
+  assert(decodeURIComponent(calls[0].url).includes('idempotency_key.eq."order:ABC"'), 'or() list keeps quotes')
+}
+
+async function testCompleteFallsBackToPullKey() {
+  const env = baseEnv()
+  const store = memoryStore()
+  await store.insert({
+    idempotency_key: 'order:ORDER_HEBERT',
+    order_id: 'ORDER_HEBERT',
+    invoice_id: 'inv:hebert-1',
+    account_name: "Nunu's Youngsville",
+    reference: '000227',
+    pick_date: 'Sep 28, 2026',
+    lines: [{ qty: '2', name: 'Seafood Gumbo (6)', unitAmount: 10200, lineAmount: 20400, currency: 'USD' }],
+    totals: { priced: true, total: 20400, subtotal: 20400, currency: 'USD', documentKind: 'invoice' },
+    todoist_task_id: null,
+    status: 'creating',
+    signature_status: null,
+    signature_printed_at: null
+  })
+  const res = await postComplete(env, store, completedEvent('task-lost', {
+    description: 'square-pull-key: order:ORDER_HEBERT\nsquare-invoice-id: inv:hebert-1'
+  }))
+  assert(res.status === 200 && res.json.queued === true, JSON.stringify(res.json))
+  assert(store.rows[0].todoist_task_id === 'task-lost', 'task id backfilled')
+  const again = await postComplete(env, store, completedEvent('task-lost', {
+    description: 'square-pull-key: order:ORDER_HEBERT'
+  }))
+  assert(again.json.duplicate === true, 'second complete does not requeue')
+  const other = await postComplete(env, store, completedEvent('task-other', {
+    description: 'square-pull-key: order:ORDER_HEBERT'
+  }))
+  assert(other.status === 503, 'a different task cannot claim a row that already has a task id')
+
+  const dotted = memoryStore()
+  await dotted.insert({
+    idempotency_key: 'order:ORDER.DOT',
+    order_id: 'ORDER.DOT',
+    account_name: "Nunu's Maurice",
+    reference: '000310',
+    pick_date: 'Sep 28, 2026',
+    lines: [{ qty: '1', name: 'Seafood Gumbo', unitAmount: 10200, lineAmount: 10200, currency: 'USD' }],
+    totals: { priced: true, total: 10200, subtotal: 10200, currency: 'USD', documentKind: 'invoice' },
+    todoist_task_id: null,
+    status: 'creating',
+    signature_status: null,
+    signature_printed_at: null
+  })
+  const dottedRes = await postComplete(env, dotted, completedEvent('task-dot', {
+    description: 'square-pull-key: order:ORDER.DOT'
+  }))
+  assert(dottedRes.status === 200 && dottedRes.json.queued === true, JSON.stringify(dottedRes.json))
+  assert(dotted.rows[0].todoist_task_id === 'task-dot', 'dotted pull key still matches')
+}
+
+async function testStoreUpdateMissFailsClosed() {
+  const store = memoryStore()
+  const realUpdate = store.update.bind(store)
+  let calls = 0
+  store.update = async (key, patch) => {
+    calls += 1
+    if (calls === 1) return null
+    return realUpdate(key, patch)
+  }
+  const todoist = todoistFake()
+  const event = {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }
+  await expectThrow(() => postEvent(baseEnv(), store, todoist, event, world()), 503)
+  assert(store.rows.length === 1 && store.rows[0].status === 'creating', 'missed update leaves the creating row')
+  assert(!store.rows[0].todoist_task_id && !store.rows[0].pdf_base64, 'missed update stores no task id and no pdf')
+  assert(todoist.created.length === 1, 'the Takeout task was still created')
+  const retry = await postEvent(baseEnv(), store, todoist, event, world())
+  assert(retry.status === 200 && retry.json.duplicate === true && retry.json.pdfStored === true, JSON.stringify(retry.json))
+  assert(store.rows[0].status === 'ready', 'retry stores the pick pdf')
+  assert(store.rows[0].pdf_base64 && store.rows[0].todoist_task_id, 'retry fills task id and pdf')
+  assert(todoist.created.length === 1, 'retry does not create a second task')
+}
+
+async function testTodoistOAuthFlow() {
+  const env = { TODOIST_CLIENT_ID: 'cid123', TODOIST_WEBHOOK_SECRET: 'csecret' }
+  const missing = await handleTodoistOAuth({ query: {}, env: {} })
+  assert(missing.status === 503, 'oauth fails closed without client id')
+  const start = await handleTodoistOAuth({ query: {}, env, randomState: 'st8', redirectUri: 'https://r.example/cb' })
+  assert(start.status === 302, 'start redirects')
+  assert(start.location.startsWith('https://app.todoist.com/oauth/authorize?client_id=cid123&scope=data%3Aread&state=st8'), start.location)
+  assert(start.cookie.includes('st8') && start.cookie.includes('HttpOnly'), start.cookie)
+  const bad = await handleTodoistOAuth({ query: { code: 'c', state: 'nope' }, cookieHeader: 'wp_todoist_oauth_state=st8', env })
+  assert(bad.status === 400, 'state mismatch refused')
+  let posted = null
+  const ok = await handleTodoistOAuth({
+    query: { code: 'c0de', state: 'st8' },
+    cookieHeader: 'a=b; wp_todoist_oauth_state=st8',
+    env,
+    redirectUri: 'https://r.example/cb',
+    fetchImpl: async (url, options) => {
+      posted = { url, body: options.body }
+      return { ok: true, status: 200, json: async () => ({ access_token: 'tok-should-not-leak' }) }
+    }
+  })
+  assert(ok.status === 200, `exchange ok ${ok.status}`)
+  assert(posted.url === 'https://api.todoist.com/oauth/access_token', posted.url)
+  assert(posted.body.includes('client_secret=csecret') && posted.body.includes('code=c0de'), posted.body)
+  assert(!ok.html.includes('tok-should-not-leak'), 'token never rendered')
+  assert(!JSON.stringify(ok).includes('tok-should-not-leak'), 'token never leaves the handler')
+  const leaked = await handleTodoistOAuth({
+    query: { code: 'c0de', state: 'st8' },
+    cookieHeader: 'wp_todoist_oauth_state=st8',
+    env,
+    fetchImpl: async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: `bad ${env.TODOIST_WEBHOOK_SECRET} tok-should-not-leak`, access_token: 'tok-should-not-leak' })
+    })
+  })
+  assert(leaked.status === 502, 'failed exchange is an error')
+  assert(!leaked.html.includes('csecret') && !leaked.html.includes('tok-should-not-leak'), leaked.html)
+  assert(!JSON.stringify(leaked).includes('tok-should-not-leak'), 'failed exchange does not return the token')
+  const denied = await handleTodoistOAuth({ query: { error: 'access_denied' }, env })
+  assert(denied.status === 400 && denied.html.includes('access_denied'), 'known oauth errors stay visible')
+}
+
+function testPollerCopies() {
+  const poll = fs.readFileSync(path.join(__dirname, 'wholesale-pull-mac-poll.sh'), 'utf8')
+  assert(poll.includes('COPIES = {"pick": 1, "signature": 2}'), 'signature prints 2 copies, pick 1')
+  assert(poll.includes('"lp", "-n", str(copies), "-d", printer'), 'lp passes copies')
+  assert(poll.includes('WHOLESALE_PULL_DEST'), 'poller dest is overridable for launchd/TCC')
+  assert(poll.includes('WHOLESALE_PULL_POLL_KEY_FILE'), 'poller reads the dedicated key from a file')
+  assert(poll.includes('WHOLESALE_PULL_POLL_KEY="${BRIDGE_API_KEY:-}"'), 'poller falls back to the bridge key')
+  assert(poll.includes('/Users/Shared/RachaelsWholesalePull/poll.key'), 'shared poll key path is outside Documents')
+  assert(poll.includes('Library/Application Support/RachaelsWholesalePull/POLL_KEY'), 'application support poll key path')
+  assert(poll.includes('Poll key file must be outside ~/Documents'), 'poller refuses a Documents key file')
+  assert(poll.includes('Poll key file must be mode 600'), 'poller requires mode 600')
+  assert(poll.includes('os.environ["WHOLESALE_PULL_POLL_KEY"]'), 'downloads use the poll key')
+  const plist = fs.readFileSync(path.join(__dirname, 'com.rachaelsseafood.wholesale-pull-poll.plist'), 'utf8')
+  assert(!plist.includes('/Documents/'), 'launch agent never touches ~/Documents')
+  assert(!plist.includes('MFC'), 'launch agent never targets the mfc')
+  assert(!plist.includes('<key>BRIDGE_API_KEY'), 'launch agent does not set the bridge key')
+  assert(!plist.includes('BRIDGE_API_KEY_FILE'), 'launch agent does not read the bridge key file')
+  assert(plist.includes('WHOLESALE_PULL_POLL_KEY_FILE'), 'launch agent points at the poll key file')
+  assert(plist.includes('Brother_HL_L3280CDW_series'), 'launch agent printer is the Brother HL')
+  assert(plist.includes('/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/POLL_KEY'), 'poll key lives outside Documents')
+  assert(poll.includes('WHOLESALE_QUEUE = "Brother_HL_L3280CDW_series"'), 'poller queue constant')
+  assert(!poll.includes('lp", "-d", "'), 'lp destination is the checked printer variable')
+}
+
+function captureRes() {
+  return {
+    statusCode: 0,
+    body: null,
+    status(code) {
+      this.statusCode = code
+      return this
+    },
+    json(body) {
+      this.body = body
+      return this
+    }
+  }
+}
+
+async function testWholesalePullPollAuth() {
+  const { authorizeBridge, authorizeWholesalePullPoll, isBridgeAuthorized } = await import('../lib/bridge-auth.js')
+  const prevBridge = process.env.BRIDGE_API_KEY
+  const prevPoll = process.env.WHOLESALE_PULL_POLL_KEY
+  const bridge = 'bridge-key-test-value'
+  const poll = 'poll-key-test-value'
+  const bearer = key => ({ headers: { authorization: `Bearer ${key}` } })
+  const alt = key => ({ headers: { 'x-bridge-key': key } })
+  try {
+    process.env.BRIDGE_API_KEY = bridge
+    process.env.WHOLESALE_PULL_POLL_KEY = poll
+    assert(authorizeWholesalePullPoll(bearer(poll), captureRes()) === true, 'poll key opens sheets')
+    assert(authorizeWholesalePullPoll(bearer(bridge), captureRes()) === true, 'bridge key still opens sheets')
+    assert(authorizeWholesalePullPoll(alt(poll), captureRes()) === true, 'poll key via x-bridge-key')
+    const wrong = captureRes()
+    assert(authorizeWholesalePullPoll(bearer('nope'), wrong) === false, 'wrong key rejected')
+    assert(wrong.statusCode === 401, 'wrong poll key is 401')
+    const bridgeRes = captureRes()
+    assert(authorizeBridge(bearer(poll), bridgeRes) === false, 'poll key does not open the bridge')
+    assert(bridgeRes.statusCode === 401, 'poll key on the bridge is 401')
+    assert(isBridgeAuthorized(bearer(poll)) === false, 'poll key is not bridge-authorized')
+    assert(isBridgeAuthorized(bearer(bridge)) === true, 'bridge key is still bridge-authorized')
+
+    delete process.env.BRIDGE_API_KEY
+    assert(authorizeWholesalePullPoll(bearer(poll), captureRes()) === true, 'poll key alone opens sheets')
+    const noBridge = captureRes()
+    assert(authorizeWholesalePullPoll(bearer(bridge), noBridge) === false, 'unset bridge key is not a sheets fallback')
+    assert(noBridge.statusCode === 401, 'missing bridge fallback is 401')
+
+    delete process.env.WHOLESALE_PULL_POLL_KEY
+    process.env.BRIDGE_API_KEY = bridge
+    assert(authorizeWholesalePullPoll(bearer(bridge), captureRes()) === true, 'bridge key alone opens sheets')
+    const noPoll = captureRes()
+    assert(authorizeWholesalePullPoll(bearer(poll), noPoll) === false, 'absent poll key is not accepted')
+    assert(noPoll.statusCode === 401, 'absent poll key is 401')
+
+    delete process.env.BRIDGE_API_KEY
+    const missing = captureRes()
+    assert(authorizeWholesalePullPoll(bearer(poll), missing) === false, 'unset keys fail closed')
+    assert(missing.statusCode === 503 && missing.body.error === 'Wholesale pull poll is not configured', JSON.stringify(missing.body))
+  } finally {
+    if (prevBridge === undefined) delete process.env.BRIDGE_API_KEY
+    else process.env.BRIDGE_API_KEY = prevBridge
+    if (prevPoll === undefined) delete process.env.WHOLESALE_PULL_POLL_KEY
+    else process.env.WHOLESALE_PULL_POLL_KEY = prevPoll
+  }
 }
 
 async function main() {
@@ -1136,6 +1525,14 @@ async function main() {
   await testHouseAccountSignatureAndLegacyReread()
   await testTodoistWebhookSkips()
   testSourceShape()
+  await testExcludedCustomerCreatesNothing()
+  await testCanonicalAccountNames()
+  await testSupabaseStoreFilters()
+  await testCompleteFallsBackToPullKey()
+  await testStoreUpdateMissFailsClosed()
+  await testTodoistOAuthFlow()
+  testPollerCopies()
+  await testWholesalePullPollAuth()
   console.log('verify-wholesale-pull: ok')
 }
 

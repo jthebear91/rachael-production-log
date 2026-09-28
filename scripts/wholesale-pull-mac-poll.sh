@@ -9,8 +9,14 @@
 # The Mac network name may show as Trey-s-A25. That is the network name, not the printer.
 # Do not run it on the Mac mini.
 #
-# Folder drop (always, including when CUPS is skipped):
-#   ~/Documents/Wholesale Ordering/pull-sheets/
+# Folder drop:
+#   Manual Terminal runs default to ~/Documents/Wholesale Ordering/pull-sheets/
+#   LaunchAgents cannot read or write ~/Documents (macOS TCC). The LaunchAgent
+#   sets WHOLESALE_PULL_DEST under ~/Library/Application Support/RachaelsWholesalePull/
+#   The poll key is read from WHOLESALE_PULL_POLL_KEY_FILE (mode 600), not from the plist.
+#   ~/Library/Application Support/RachaelsWholesalePull/POLL_KEY
+#   or /Users/Shared/RachaelsWholesalePull/poll.key
+#   Both are outside ~/Documents. Do not put BRIDGE_API_KEY on this Mac.
 #
 # Pick lists are saved as pick-list-*.pdf.
 # Signature invoices (Takeout task checked off) are saved as SIGNATURE-*.pdf.
@@ -22,27 +28,79 @@
 # Set WHOLESALE_PULL_PRINTER to empty for folder-drop only.
 # MFC-L5915DW is Maurice-only and must never be used for wholesale.
 #
-#   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh --dry-run
-#   BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
+#   WHOLESALE_PULL_POLL_KEY=... bash scripts/wholesale-pull-mac-poll.sh --dry-run
+#   WHOLESALE_PULL_POLL_KEY=... bash scripts/wholesale-pull-mac-poll.sh
+# BRIDGE_API_KEY is accepted only when WHOLESALE_PULL_POLL_KEY is unset.
 
 set -euo pipefail
 
 BASE="${APP_BASE_URL:-https://rachael-production-log.vercel.app}"
 BASE="${BASE%/}"
-DEST="${HOME}/Documents/Wholesale Ordering/pull-sheets"
+# LaunchAgents cannot read or write ~/Documents on macOS (TCC privacy controls
+# return "Operation not permitted"; this already broke the Maurice mint worker).
+# The LaunchAgent sets WHOLESALE_PULL_DEST to a folder outside ~/Documents, e.g.
+#   ~/Library/Application Support/RachaelsWholesalePull/pull-sheets
+# Manual runs from Terminal keep the ~/Documents drop folder by default.
+DEST="${WHOLESALE_PULL_DEST:-${HOME}/Documents/Wholesale Ordering/pull-sheets}"
 DRY=0
 if [[ "${1:-}" == "--dry-run" ]]; then
   DRY=1
 fi
 
-if [[ -z "${BRIDGE_API_KEY:-}" ]]; then
-  echo "BRIDGE_API_KEY is not set" >&2
-  exit 1
+# Dedicated poll key. Outside ~/Documents, mode 600. BRIDGE_API_KEY is a fallback
+# for a manual run that already has it; the LaunchAgent does not use that secret.
+reject_key_path() {
+  case "$1" in
+    "${HOME}/Documents"|"${HOME}/Documents/"*)
+      echo "Poll key file must be outside ~/Documents" >&2
+      exit 1
+      ;;
+  esac
+}
+
+read_poll_key_file() {
+  local file="$1"
+  reject_key_path "$file"
+  if [[ ! -r "$file" ]]; then
+    echo "Poll key file is not readable" >&2
+    exit 1
+  fi
+  local mode
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    mode="$(stat -f '%Lp' "$file")"
+  else
+    mode="$(stat -c '%a' "$file")"
+  fi
+  if [[ "$mode" != "600" && "$mode" != "0600" ]]; then
+    echo "Poll key file must be mode 600" >&2
+    exit 1
+  fi
+  tr -d '[:space:]' < "$file"
+}
+
+if [[ -z "${WHOLESALE_PULL_POLL_KEY:-}" && -n "${WHOLESALE_PULL_POLL_KEY_FILE:-}" ]]; then
+  WHOLESALE_PULL_POLL_KEY="$(read_poll_key_file "${WHOLESALE_PULL_POLL_KEY_FILE}")"
+elif [[ -z "${WHOLESALE_PULL_POLL_KEY:-}" && -r "${HOME}/Library/Application Support/RachaelsWholesalePull/POLL_KEY" ]]; then
+  WHOLESALE_PULL_POLL_KEY="$(read_poll_key_file "${HOME}/Library/Application Support/RachaelsWholesalePull/POLL_KEY")"
+elif [[ -z "${WHOLESALE_PULL_POLL_KEY:-}" && -r "/Users/Shared/RachaelsWholesalePull/poll.key" ]]; then
+  WHOLESALE_PULL_POLL_KEY="$(read_poll_key_file "/Users/Shared/RachaelsWholesalePull/poll.key")"
 fi
 
+if [[ -z "${WHOLESALE_PULL_POLL_KEY:-}" ]]; then
+  if [[ -z "${BRIDGE_API_KEY:-}" && -n "${BRIDGE_API_KEY_FILE:-}" && -r "${BRIDGE_API_KEY_FILE}" ]]; then
+    BRIDGE_API_KEY="$(tr -d '[:space:]' < "${BRIDGE_API_KEY_FILE}")"
+  fi
+  WHOLESALE_PULL_POLL_KEY="${BRIDGE_API_KEY:-}"
+fi
+if [[ -z "${WHOLESALE_PULL_POLL_KEY:-}" ]]; then
+  echo "WHOLESALE_PULL_POLL_KEY is not set" >&2
+  exit 1
+fi
+export WHOLESALE_PULL_POLL_KEY
+
 mkdir -p "$DEST"
-pick_payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets" -H "Authorization: Bearer ${BRIDGE_API_KEY}")"
-signature_payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets?queue=signature" -H "Authorization: Bearer ${BRIDGE_API_KEY}")"
+pick_payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets" -H "Authorization: Bearer ${WHOLESALE_PULL_POLL_KEY}")"
+signature_payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets?queue=signature" -H "Authorization: Bearer ${WHOLESALE_PULL_POLL_KEY}")"
 RUN_USER="$(id -un)"
 MACHINE_ID=""
 if command -v ioreg >/dev/null 2>&1; then
@@ -56,8 +114,11 @@ pick_payload, signature_payload, dest, dry, base, run_user, machine_id = sys.arg
 dry = dry == "1"
 pick_rows = json.loads(pick_payload).get("data") or []
 signature_rows = json.loads(signature_payload).get("data") or []
-key = os.environ["BRIDGE_API_KEY"]
+key = os.environ["WHOLESALE_PULL_POLL_KEY"]
 WHOLESALE_QUEUE = "Brother_HL_L3280CDW_series"
+# Jordan 2026-09-28: every SIGNATURE invoice prints 2 copies on the Brother HL
+# (one for the customer to sign and keep, one for us). Pick lists stay at 1.
+COPIES = {"pick": 1, "signature": 2}
 WHOLESALE_USER = "rachaelsseafood"
 WHOLESALE_MACHINE_ID = "1c85823c-2c30-4ffb-b905-0241b4daebfe"
 # Unset defaults to the wholesale queue. An explicit empty value is folder-drop only.
@@ -123,8 +184,9 @@ def handle(rows, queue, prefix):
         os.replace(tmp, path)
         print(f"saved {path}")
         if printer:
-            subprocess.check_call(["lp", "-d", printer, path])
-            print(f"sent to {printer}")
+            copies = COPIES.get(queue, 1)
+            subprocess.check_call(["lp", "-n", str(copies), "-d", printer, path])
+            print(f"sent to {printer} copies={copies}")
         body = {"key": pull_key}
         if queue == "signature":
             body["queue"] = "signature"

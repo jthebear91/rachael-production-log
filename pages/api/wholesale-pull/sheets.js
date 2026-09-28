@@ -1,4 +1,4 @@
-import { authorizeBridge, sendBridgeError } from '../../../lib/bridge-auth'
+import { authorizeWholesalePullPoll, sendBridgeError } from '../../../lib/bridge-auth'
 import { handlePullSheets } from '../../../lib/wholesale-pull'
 
 function one(value) {
@@ -8,7 +8,7 @@ function one(value) {
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store')
   res.setHeader('X-Robots-Tag', 'noindex, nofollow')
-  if (!authorizeBridge(req, res)) return
+  if (!authorizeWholesalePullPoll(req, res)) return
   try {
     const result = await handlePullSheets({
       method: req.method,

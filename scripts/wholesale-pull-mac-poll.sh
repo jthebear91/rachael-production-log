@@ -5,9 +5,12 @@
 #
 # Run this on the wholesale Mac only:
 #   user rachaelsseafood
-#   machineId 1c85823c-2c30-4ffb-b905-0241b4daebfe
+#   IOPlatformUUID 9670DC09-2362-51D4-8476-38D5001BD500
+#     (ioreg -rd1 -c IOPlatformExpertDevice; compared case-insensitively)
+#   WHOLESALE_PULL_MAC_UUID overrides that expected UUID. The LaunchAgent plist sets it.
+# 1c85823c-2c30-4ffb-b905-0241b4daebfe is an unrelated registration id, not this hardware UUID.
 # The Mac network name may show as Trey-s-A25. That is the network name, not the printer.
-# Do not run it on the Mac mini.
+# Do not run it on the Mac mini. A non-match exits before any network poll and does not print or mark.
 #
 # Folder drop:
 #   Manual Terminal runs default to ~/Documents/Wholesale Ordering/pull-sheets/
@@ -45,6 +48,38 @@ DEST="${WHOLESALE_PULL_DEST:-${HOME}/Documents/Wholesale Ordering/pull-sheets}"
 DRY=0
 if [[ "${1:-}" == "--dry-run" ]]; then
   DRY=1
+fi
+
+# Fail closed before the key is read and before any network poll.
+# An empty detected UUID (no ioreg) does not match.
+WHOLESALE_USER="rachaelsseafood"
+DEFAULT_WHOLESALE_MAC_UUID="9670DC09-2362-51D4-8476-38D5001BD500"
+EXPECTED_MAC_UUID="${WHOLESALE_PULL_MAC_UUID:-$DEFAULT_WHOLESALE_MAC_UUID}"
+
+normalize_uuid() {
+  printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'
+}
+
+uuid_eq() {
+  local a b
+  a="$(normalize_uuid "$1")"
+  b="$(normalize_uuid "$2")"
+  [[ -n "$a" && -n "$b" && "$a" == "$b" ]]
+}
+
+RUN_USER="$(id -un)"
+MACHINE_ID=""
+if command -v ioreg >/dev/null 2>&1; then
+  MACHINE_ID="$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4; exit}' || true)"
+fi
+
+# --dry-run may list the queue from another machine. It never prints or marks.
+# A real run, including the LaunchAgent, is refused before curl.
+if [[ "$DRY" -eq 0 ]]; then
+  if [[ "$RUN_USER" != "$WHOLESALE_USER" ]] || ! uuid_eq "$MACHINE_ID" "$EXPECTED_MAC_UUID"; then
+    echo "This poll runs on the wholesale Mac only (user ${WHOLESALE_USER}, IOPlatformUUID ${EXPECTED_MAC_UUID}), not the Mac mini. Nothing was printed or marked." >&2
+    exit 1
+  fi
 fi
 
 # Dedicated poll key. Outside ~/Documents, mode 600. BRIDGE_API_KEY is a fallback
@@ -101,16 +136,11 @@ export WHOLESALE_PULL_POLL_KEY
 mkdir -p "$DEST"
 pick_payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets" -H "Authorization: Bearer ${WHOLESALE_PULL_POLL_KEY}")"
 signature_payload="$(curl -fsS "${BASE}/api/wholesale-pull/sheets?queue=signature" -H "Authorization: Bearer ${WHOLESALE_PULL_POLL_KEY}")"
-RUN_USER="$(id -un)"
-MACHINE_ID=""
-if command -v ioreg >/dev/null 2>&1; then
-  MACHINE_ID="$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4; exit}')"
-fi
 
-python3 - "$pick_payload" "$signature_payload" "$DEST" "$DRY" "$BASE" "$RUN_USER" "$MACHINE_ID" <<'PY'
+python3 - "$pick_payload" "$signature_payload" "$DEST" "$DRY" "$BASE" "$RUN_USER" "$MACHINE_ID" "$EXPECTED_MAC_UUID" <<'PY'
 import json, os, subprocess, sys, urllib.parse, urllib.request
 
-pick_payload, signature_payload, dest, dry, base, run_user, machine_id = sys.argv[1:]
+pick_payload, signature_payload, dest, dry, base, run_user, machine_id, expected_uuid = sys.argv[1:]
 dry = dry == "1"
 pick_rows = json.loads(pick_payload).get("data") or []
 signature_rows = json.loads(signature_payload).get("data") or []
@@ -120,15 +150,16 @@ WHOLESALE_QUEUE = "Brother_HL_L3280CDW_series"
 # (one for the customer to sign and keep, one for us). Pick lists stay at 1.
 COPIES = {"pick": 1, "signature": 2}
 WHOLESALE_USER = "rachaelsseafood"
-WHOLESALE_MACHINE_ID = "1c85823c-2c30-4ffb-b905-0241b4daebfe"
 # Unset defaults to the wholesale queue. An explicit empty value is folder-drop only.
 if "WHOLESALE_PULL_PRINTER" not in os.environ:
     printer = WHOLESALE_QUEUE
 else:
     printer = os.environ.get("WHOLESALE_PULL_PRINTER", "").strip()
+# Backup of the bash guard above: never print or mark off the wholesale Mac.
 on_wholesale_mac = (
     run_user == WHOLESALE_USER
-    and machine_id.lower() == WHOLESALE_MACHINE_ID
+    and expected_uuid.strip() != ""
+    and machine_id.strip().lower() == expected_uuid.strip().lower()
 )
 
 if printer:
@@ -150,14 +181,14 @@ if printer:
 if not dry and not on_wholesale_mac:
     print(
         "This poll runs on the wholesale Mac only "
-        f"(user {WHOLESALE_USER}, machineId {WHOLESALE_MACHINE_ID}), not the Mac mini. "
+        f"(user {WHOLESALE_USER}, IOPlatformUUID {expected_uuid.strip()}), not the Mac mini. "
         "Nothing was printed or marked.",
         file=sys.stderr,
     )
     sys.exit(1)
 
 if not pick_rows and not signature_rows:
-    print("No pending pick lists or signature invoices.")
+    # LaunchAgent interval is 30s. An empty queue is success and must stay quiet.
     sys.exit(0)
 
 def handle(rows, queue, prefix):

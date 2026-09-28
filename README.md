@@ -24,7 +24,7 @@ Daily production logging app for Rachael's Wholesale LLC.
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase Publishable Key |
 | `SUPABASE_SERVICE_KEY` | Supabase service role key for Batch Tracker writes and Maurice pick tokens. Server-only. |
 | `APP_BASE_URL` | Public origin encoded in Maurice pick QR codes. Defaults to `https://rachael-production-log.vercel.app` in production. |
-| `SQUARE_MAURICE_CUSTOMER_ID` | Maurice's customer id on the **wholesale** Square account. Optional. Used by the Monday unpaid rollup. Default `TQ8JFGXMZGTY8JNKCY1TV72618`. |
+| `SQUARE_MAURICE_CUSTOMER_ID` | Maurice's customer id on the **wholesale** Square account. Optional. Used by the Monday unpaid rollup. Default `TQ8JFGXMZGTY8JNKCY1TV72618`. Wholesale-pull excludes this customer, and that default id, so the rollup invoice does not create a Takeout task. The rollup is due 14 America/Chicago days after creation and bills the latest live Send per calendar day. |
 | `MAURICE_PICK_SEND_DRY_RUN` | Default on (unset counts as on). Send records the pull, appends the week log, and logs the intended `IN_STOCK` → `SOLD` adjustment. It does not call `inventory.batchChange` and it does not create an invoice. Set to `0` only together with `MAURICE_PICK_LIVE_DEDUCT=1`, after the Claude step 7 edit. |
 | `MAURICE_PICK_LIVE_DEDUCT` | Default off. Set to `1` with `MAURICE_PICK_SEND_DRY_RUN=0` to deduct final quantities at wholesale location `L6D106R4VNA72`. |
 | `JORDAN_NOTIFY_WEBHOOK` | Optional URL for the post-pull total and shorts. Not Twilio. |

@@ -1133,11 +1133,13 @@ function testSourceShape() {
 }
 
 const LAFAYETTE = 'FY8QC4GPN38Q30MJY8QXSGNDFC'
+const MAURICE_CAFE = 'TQ8JFGXMZGTY8JNKCY1TV72618'
 const NUNUS_YV = 'GFSB4VQXTKPQ84TQCGBTRJMRWM'
 const NUNUS_MAURICE = '59K0PJZG791Z0DG3GAFMX0SEPM'
 
 async function testExcludedCustomerCreatesNothing() {
   assert(EXCLUDED_CUSTOMER_IDS[LAFAYETTE], 'lafayette is excluded by default')
+  assert(EXCLUDED_CUSTOMER_IDS[MAURICE_CAFE] === "Rachael's Cafe Maurice", 'maurice cafe is excluded by default')
   const store = memoryStore()
   const todoist = todoistFake()
   const squareWorld = world()
@@ -1178,6 +1180,28 @@ async function testExcludedCustomerCreatesNothing() {
   }, orderWorld)
   assert(orderRes.json.skipped === 'excluded_customer', JSON.stringify(orderRes.json))
   assert(todoist.created.length === 0, 'excluded order creates no task')
+
+  const mauriceWorld = world()
+  mauriceWorld.invoice = { ...invoiceFixture(), primary_recipient: { customer_id: MAURICE_CAFE } }
+  mauriceWorld.order = orderFixture({ customer_id: MAURICE_CAFE })
+  const mauriceStore = memoryStore()
+  const maurice = await postEvent(baseEnv(), mauriceStore, todoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, mauriceWorld)
+  assert(maurice.json.skipped === 'excluded_customer', JSON.stringify(maurice.json))
+  assert(mauriceStore.rows.length === 0, 'maurice rollup stores no pick pdf')
+  assert(todoist.created.length === 0, 'maurice rollup creates no takeout task')
+
+  const overrideWorld = world()
+  overrideWorld.invoice = { ...invoiceFixture(), primary_recipient: { customer_id: 'MAURICE_OVERRIDE' } }
+  overrideWorld.order = orderFixture({ customer_id: 'MAURICE_OVERRIDE' })
+  const override = await postEvent(baseEnv({ SQUARE_MAURICE_CUSTOMER_ID: 'MAURICE_OVERRIDE' }), memoryStore(), todoist, {
+    type: 'invoice.published',
+    data: { object: { invoice: { id: 'inv:hebert-1' } } }
+  }, overrideWorld)
+  assert(override.json.skipped === 'excluded_customer', JSON.stringify(override.json))
+  assert(todoist.created.length === 0, 'maurice customer override creates no task')
 }
 
 async function testCanonicalAccountNames() {

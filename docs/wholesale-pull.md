@@ -198,7 +198,10 @@ Install the poll on the wholesale Mac with `scripts/com.rachaelsseafood.wholesal
 
 **Signature copies (Jordan 2026-09-28):** every SIGNATURE invoice prints **2 copies** (`lp -n 2 -d Brother_HL_L3280CDW_series`): one for the customer to sign and keep, one for us. Pick lists stay at 1 copy. The poller sets this in `COPIES`.
 
-**Excluded house accounts:** `EXCLUDED_CUSTOMER_IDS` in `lib/wholesale-pull.js` (plus `WHOLESALE_PULL_EXCLUDED_CUSTOMER_IDS`). Rachael's Cafe Lafayette (`FY8QC4GPN38Q30MJY8QXSGNDFC`) gets a recurring invoice on every Lafayette order and creates **no Takeout task and no pick PDF** (`skipped: excluded_customer`). Matching is by Square customer id, never by name.
+**Excluded house accounts:** `EXCLUDED_CUSTOMER_IDS` in `lib/wholesale-pull.js` (plus `WHOLESALE_PULL_EXCLUDED_CUSTOMER_IDS`). Matching is by Square customer id, never by name. Both of these create **no Takeout task and no pick PDF** (`skipped: excluded_customer`):
+
+- Rachael's Cafe Lafayette (`FY8QC4GPN38Q30MJY8QXSGNDFC`) gets a recurring invoice on every Lafayette order.
+- Rachael's Cafe Maurice (`TQ8JFGXMZGTY8JNKCY1TV72618`) is the Monday billing rollup from `POST /api/pick/maurice-restock/week-invoice`. Publishing that invoice is billing only. Maurice's physical pulls stay on the Maurice pick flow. If `SQUARE_MAURICE_CUSTOMER_ID` overrides that customer, the override id is excluded too.
 
 **Canonical names:** `ACCOUNT_DISPLAY_NAMES` keyed by Square customer id (plus `WHOLESALE_PULL_ACCOUNT_NAMES_JSON`): `GFSB4VQXTKPQ84TQCGBTRJMRWM` → Nunu's Youngsville, `59K0PJZG791Z0DG3GAFMX0SEPM` → Nunu's Maurice. Heberts/Hebert's names stay as Square has them, and speech nicknames are still stripped. Titles never carry `$`.
 
@@ -213,7 +216,7 @@ Install the poll on the wholesale Mac with `scripts/com.rachaelsseafood.wholesal
 | `TODOIST_WEBHOOK_SECRET` | Yes, to print on complete | Todoist app client secret. Header `X-Todoist-Hmac-SHA256`. Not `TODOIST_TOKEN`. Also the OAuth client secret for the one-time authorize route. The access token from that exchange is not stored. |
 | `TODOIST_CLIENT_ID` | Yes, once, to activate webhooks | App Console client id. Not secret. `GET /api/wholesale-pull/todoist-oauth`. |
 | `TODOIST_OAUTH_REDIRECT_URI` | No | Defaults to `https://rachael-production-log.vercel.app/api/wholesale-pull/todoist-oauth`. Must match the App Console redirect URL exactly. |
-| `WHOLESALE_PULL_EXCLUDED_CUSTOMER_IDS` | No | Comma-separated Square customer ids added to the built-in exclusion list. Rachael's Cafe Lafayette is already excluded in code. |
+| `WHOLESALE_PULL_EXCLUDED_CUSTOMER_IDS` | No | Comma-separated Square customer ids added to the built-in exclusion list. Rachael's Cafe Lafayette and Rachael's Cafe Maurice are already excluded in code. `SQUARE_MAURICE_CUSTOMER_ID` is excluded when set. |
 | `WHOLESALE_PULL_ACCOUNT_NAMES_JSON` | No | JSON object of Square customer id to crew-facing name, merged over Nunu's Youngsville and Nunu's Maurice. |
 | `SQUARE_WEBHOOK_NOTIFICATION_URL` | Yes | Exact subscription URL. |
 | `SQUARE_WHOLESALE_TOKEN` | Yes | Falls back to `SQUARE_TOKEN`. Read scopes only. |

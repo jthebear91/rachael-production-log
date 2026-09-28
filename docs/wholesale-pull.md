@@ -154,7 +154,15 @@ curl -sS -X POST "https://rachael-production-log.vercel.app/api/wholesale-pull/r
 
 The server stores both PDFs. Vercel cannot see the office printer.
 
-A manual run from Terminal drops files in `~/Documents/Wholesale Ordering/pull-sheets/`. The LaunchAgent cannot read or write `~/Documents` (macOS privacy controls), so its state, logs, bridge key, and PDFs live under `~/Library/Application Support/RachaelsWholesalePull/`. That folder is outside `~/Documents`. The bridge key stays mode `0600` there rather than in `/Users/Shared`, where other Mac users could read it.
+A manual run from Terminal drops files in `~/Documents/Wholesale Ordering/pull-sheets/`. The LaunchAgent cannot read or write `~/Documents` (macOS privacy controls), so its state, logs, poll key, and PDFs live under `~/Library/Application Support/RachaelsWholesalePull/`. That folder is outside `~/Documents`.
+
+The poller authenticates with `WHOLESALE_PULL_POLL_KEY`, not `BRIDGE_API_KEY`. The bridge secret is shared with other routes and cannot be read back, so it cannot be copied onto the Mac or rotated for this job. Write the poll key to a mode `600` file:
+
+`~/Library/Application Support/RachaelsWholesalePull/POLL_KEY`
+
+or `/Users/Shared/RachaelsWholesalePull/poll.key`
+
+The LaunchAgent points `WHOLESALE_PULL_POLL_KEY_FILE` at the Application Support file. The script also accepts the Shared path. It refuses a key file under `~/Documents` and refuses a file that is not mode `600`. If `WHOLESALE_PULL_POLL_KEY` is unset, the script and the sheets routes fall back to `BRIDGE_API_KEY` when that variable is set. `POST /api/wholesale-pull/replay` stays on `BRIDGE_API_KEY` only.
 
 Pick lists are `pick-list-*.pdf` and print **1** copy. Signature invoices are `SIGNATURE-*.pdf` and print **2** copies (`lp -n 2`). Both use only `Brother_HL_L3280CDW_series`.
 
@@ -170,23 +178,23 @@ MFC-L5915DW is Maurice-only and must never be used for wholesale.
 
 ```bash
 WHOLESALE_PULL_PRINTER=Brother_HL_L3280CDW_series
-BRIDGE_API_KEY=... bash scripts/wholesale-pull-mac-poll.sh
+WHOLESALE_PULL_POLL_KEY=... bash scripts/wholesale-pull-mac-poll.sh
 ```
 
 An empty `WHOLESALE_PULL_PRINTER` skips CUPS and still writes the PDF. The default sends the saved file to `Brother_HL_L3280CDW_series` only when the user and machine id match the wholesale Mac. Any other queue, including MFC-L5915DW, makes the script exit before `lp`. The script does not call the Maurice mint handoff.
 
-Install the poll on the wholesale Mac with `scripts/com.rachaelsseafood.wholesale-pull-poll.plist` (see the comment in that file). It runs every 30 seconds as user `rachaelsseafood` and reads `BRIDGE_API_KEY` from a file, not from the plist.
+Install the poll on the wholesale Mac with `scripts/com.rachaelsseafood.wholesale-pull-poll.plist` (see the comment in that file). It runs every 30 seconds as user `rachaelsseafood` and reads `WHOLESALE_PULL_POLL_KEY` from a mode `600` file outside `~/Documents`, not from the plist.
 
 `GET /api/wholesale-pull/sheets` lists unprinted pick lists. `GET /api/wholesale-pull/sheets?format=pdf&key=order:…` downloads one. `POST /api/wholesale-pull/sheets` with `{ "key": "order:…" }` marks the pick list printed.
 
-`GET /api/wholesale-pull/sheets?queue=signature` lists signature invoices waiting to print. `GET /api/wholesale-pull/sheets?format=pdf&queue=signature&key=order:…` downloads that PDF, not the pick list. `POST /api/wholesale-pull/sheets` with `{ "key": "order:…", "queue": "signature" }` marks the signature printed. All of these require `BRIDGE_API_KEY`.
+`GET /api/wholesale-pull/sheets?queue=signature` lists signature invoices waiting to print. `GET /api/wholesale-pull/sheets?format=pdf&queue=signature&key=order:…` downloads that PDF, not the pick list. `POST /api/wholesale-pull/sheets` with `{ "key": "order:…", "queue": "signature" }` marks the signature printed. These poll and ack routes accept `WHOLESALE_PULL_POLL_KEY`. They also accept `BRIDGE_API_KEY` when that variable is set. If neither secret is set, they return **503**. A wrong key is **401**. Send the key as `Authorization: Bearer …` or `x-bridge-key`.
 
 ## 2026-09-28 fixes (Jordan)
 
 **Signature print never fired. Three separate breaks:**
 1. **Supabase filter bug (code).** The store wrote `idempotency_key=eq."order:…"`. PostgREST only unwraps double quotes inside `or=(…)` / `in.(…)` (`pLogicSingleVal` / `pListElement`). A plain `eq.` value is free-form (`pSingleVal` keeps every character), so the quotes were compared literally, every PATCH/GET by key matched **zero rows**, and PostgREST still returned 200. Rows stayed `status=creating` with no `todoist_task_id` and no `pdf_base64`. The sheets queue stayed empty, and `findByTodoistTaskId` could never match a completed task. `eqFilter()` sends the value unquoted. `or=(…)` still quotes. If that update still matches nothing, the webhook returns **503** so Square retries; the retry finds the Takeout task already created and stores the PDF instead of creating a second task. The Todoist complete handler also falls back to `square-pull-key:` in the task when no row has the task id. Rows already stuck at `creating` need a replay while the Takeout task is still open. A task that was checked off before this fix will not get another `item:completed` until it is reopened and completed again.
 2. **Todoist webhook never delivered.** The route got zero requests. Todoist only activates an app webhook for a user once that user finishes the app's OAuth flow, token exchange included, and that applies to the app creator too. New route `GET /api/wholesale-pull/todoist-oauth` runs the flow server-side (needs `TODOIST_CLIENT_ID`; client secret = `TODOIST_WEBHOOK_SECRET`). The token is not stored. Set the App Console OAuth redirect URL to `https://rachael-production-log.vercel.app/api/wholesale-pull/todoist-oauth`, then open that URL while logged into the Takeout Todoist account (wholesale@rachaelsseafood.com).
-3. **Mac poller was never installed.** There was no LaunchAgent on the wholesale Mac, and a LaunchAgent can't write `~/Documents` (macOS TCC; that already broke the Maurice mint worker). `scripts/com.rachaelsseafood.wholesale-pull-poll.plist` runs the poll from `~/Library/Application Support/RachaelsWholesalePull/` with `WHOLESALE_PULL_DEST` and `BRIDGE_API_KEY_FILE`.
+3. **Mac poller was never installed.** There was no LaunchAgent on the wholesale Mac, and a LaunchAgent can't write `~/Documents` (macOS TCC; that already broke the Maurice mint worker). `scripts/com.rachaelsseafood.wholesale-pull-poll.plist` runs the poll from `~/Library/Application Support/RachaelsWholesalePull/` with `WHOLESALE_PULL_DEST` and `WHOLESALE_PULL_POLL_KEY_FILE` (mode 600). `/Users/Shared/RachaelsWholesalePull/poll.key` is the other allowed key path. The poller does not use `BRIDGE_API_KEY`.
 
 **Signature copies (Jordan 2026-09-28):** every SIGNATURE invoice prints **2 copies** (`lp -n 2 -d Brother_HL_L3280CDW_series`): one for the customer to sign and keep, one for us. Pick lists stay at 1 copy. The poller sets this in `COPIES`.
 
@@ -211,7 +219,8 @@ Install the poll on the wholesale Mac with `scripts/com.rachaelsseafood.wholesal
 | `SQUARE_WHOLESALE_TOKEN` | Yes | Falls back to `SQUARE_TOKEN`. Read scopes only. |
 | `SQUARE_WHOLESALE_LOCATION_ID` | Yes | `L6D106R4VNA72`. Falls back to `SQUARE_LOCATION_ID`. |
 | `SUPABASE_SERVICE_KEY` and `NEXT_PUBLIC_SUPABASE_URL` | Yes, for PDF storage and idempotency | Run the SQL file first. |
-| `BRIDGE_API_KEY` | Yes, for replay and the Mac download | Already used by the Square bridge. |
+| `WHOLESALE_PULL_POLL_KEY` | Yes, for the Mac poller | New secret for `GET`/`POST /api/wholesale-pull/sheets` only. Write the same value to the Mac key file (mode 600). Not accepted by replay or other bridge routes. |
+| `BRIDGE_API_KEY` | Yes, for replay and the rest of the bridge | Sheets fall back to this when it is set. Do not copy it onto the Mac. It cannot be read back. |
 | `WHOLESALE_PULL_TENDER_NAMES` | No | Extra house-account tender substrings. |
 | `WHOLESALE_PULL_ALL_COMPLETED` | No | `1` pulls every completed wholesale sale, including card. |
 | `WHOLESALE_PULL_DEV_BYPASS` | No | Never set in production. |
@@ -222,7 +231,7 @@ Install the poll on the wholesale Mac with `scripts/com.rachaelsseafood.wholesal
 2. **Token scopes** (read only). The wholesale token needs `INVOICES_READ`, `ORDERS_READ`, `PAYMENTS_READ`, `CUSTOMERS_READ`, and `ITEMS_READ`. It must not be used to charge cards. This feature never calls Payments create or `inventory.batchChange`.
 3. **Supabase SQL** `supabase/wholesale_pulls.sql` has to be applied once or PDFs are not queued for the Mac.
 4. **Feature flag** stays off until the three items above are done. Then set `WHOLESALE_PULL_ENABLED=1` and redeploy.
-5. **CUPS LaunchAgent** is installed on the wholesale Mac from `scripts/com.rachaelsseafood.wholesale-pull-poll.plist`, not started by Vercel. User `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`. The network name may be `Trey-s-A25`; that is not the printer. The only queue is `Brother_HL_L3280CDW_series` (Brother HL-L3280CDW). Signature invoices print 2 copies. Pick lists print 1. MFC-L5915DW is Maurice-only. The agent's files stay under `~/Library/Application Support/RachaelsWholesalePull/` because launchd cannot use `~/Documents`.
+5. **CUPS LaunchAgent** is installed on the wholesale Mac from `scripts/com.rachaelsseafood.wholesale-pull-poll.plist`, not started by Vercel. User `rachaelsseafood`, machineId `1c85823c-2c30-4ffb-b905-0241b4daebfe`. The network name may be `Trey-s-A25`; that is not the printer. The only queue is `Brother_HL_L3280CDW_series` (Brother HL-L3280CDW). Signature invoices print 2 copies. Pick lists print 1. MFC-L5915DW is Maurice-only. The agent's files stay under `~/Library/Application Support/RachaelsWholesalePull/` because launchd cannot use `~/Documents`. Set `WHOLESALE_PULL_POLL_KEY` on Vercel and store that value in `POLL_KEY` (mode 600) or `/Users/Shared/RachaelsWholesalePull/poll.key`. Do not put `BRIDGE_API_KEY` on the Mac.
 6. **Todoist webhook** is not created by this repo. Subscribe `item:completed` to the callback URL above, set `TODOIST_WEBHOOK_SECRET` and `TODOIST_CLIENT_ID`, set the App Console redirect URL, then open `GET /api/wholesale-pull/todoist-oauth` while logged into the Takeout account. Todoist does not deliver app webhooks for a user until that OAuth token exchange finishes. The token is not stored.
 7. **Signature columns.** Re-run `supabase/wholesale_pulls.sql` so `signature_status` and `todoist_task_id` exist. Without that, a completed task cannot be queued for the Mac.
 8. **Hebert's practice task** waits on Jordan. Replay with `apply: false` first. `--apply` creates the Takeout task. The signature PDF is queued only after that task is checked off, and only the Mac poll sends it to the printer.

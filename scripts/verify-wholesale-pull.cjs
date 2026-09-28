@@ -1115,6 +1115,15 @@ function testSourceShape() {
   assert(docs.includes('Jordan lock 2026-09-25'), 'docs cite the lock')
   const replay = fs.readFileSync(path.join(root, 'pages/api/wholesale-pull/replay.js'), 'utf8')
   assert(replay.includes('withBridgePost'), 'replay is bridge gated')
+  assert(!replay.includes('WHOLESALE_PULL_POLL_KEY'), 'replay does not accept the poll key')
+  const sheetsRoute = fs.readFileSync(path.join(root, 'pages/api/wholesale-pull/sheets.js'), 'utf8')
+  assert(sheetsRoute.includes('authorizeWholesalePullPoll'), 'sheets accept the poll key')
+  assert(!sheetsRoute.includes('authorizeBridge'), 'sheets are not bridge-only')
+  const authSrc = fs.readFileSync(path.join(root, 'lib/bridge-auth.js'), 'utf8')
+  const bridgeFn = authSrc.slice(authSrc.indexOf('export function authorizeBridge'), authSrc.indexOf('export function authorizePickMint'))
+  const isBridgeFn = authSrc.slice(authSrc.indexOf('export function isBridgeAuthorized'), authSrc.indexOf('export function authorizeBridge'))
+  assert(!bridgeFn.includes('WHOLESALE_PULL_POLL_KEY'), 'bridge auth ignores the poll key')
+  assert(!isBridgeFn.includes('WHOLESALE_PULL_POLL_KEY'), 'sales bridge check ignores the poll key')
   const maurice = fs.readFileSync(path.join(root, 'pages/api/pick/maurice-restock/create.js'), 'utf8')
   assert(maurice.includes('authorizePickMint'), 'maurice mint route still mint-gated')
   assert(!maurice.includes('wholesale-pull'), 'maurice route does not import wholesale pull')
@@ -1394,14 +1403,86 @@ function testPollerCopies() {
   assert(poll.includes('COPIES = {"pick": 1, "signature": 2}'), 'signature prints 2 copies, pick 1')
   assert(poll.includes('"lp", "-n", str(copies), "-d", printer'), 'lp passes copies')
   assert(poll.includes('WHOLESALE_PULL_DEST'), 'poller dest is overridable for launchd/TCC')
-  assert(poll.includes('BRIDGE_API_KEY_FILE'), 'poller can read the key from a file')
+  assert(poll.includes('WHOLESALE_PULL_POLL_KEY_FILE'), 'poller reads the dedicated key from a file')
+  assert(poll.includes('WHOLESALE_PULL_POLL_KEY="${BRIDGE_API_KEY:-}"'), 'poller falls back to the bridge key')
+  assert(poll.includes('/Users/Shared/RachaelsWholesalePull/poll.key'), 'shared poll key path is outside Documents')
+  assert(poll.includes('Library/Application Support/RachaelsWholesalePull/POLL_KEY'), 'application support poll key path')
+  assert(poll.includes('Poll key file must be outside ~/Documents'), 'poller refuses a Documents key file')
+  assert(poll.includes('Poll key file must be mode 600'), 'poller requires mode 600')
+  assert(poll.includes('os.environ["WHOLESALE_PULL_POLL_KEY"]'), 'downloads use the poll key')
   const plist = fs.readFileSync(path.join(__dirname, 'com.rachaelsseafood.wholesale-pull-poll.plist'), 'utf8')
   assert(!plist.includes('/Documents/'), 'launch agent never touches ~/Documents')
   assert(!plist.includes('MFC'), 'launch agent never targets the mfc')
+  assert(!plist.includes('<key>BRIDGE_API_KEY'), 'launch agent does not set the bridge key')
+  assert(!plist.includes('BRIDGE_API_KEY_FILE'), 'launch agent does not read the bridge key file')
+  assert(plist.includes('WHOLESALE_PULL_POLL_KEY_FILE'), 'launch agent points at the poll key file')
   assert(plist.includes('Brother_HL_L3280CDW_series'), 'launch agent printer is the Brother HL')
-  assert(plist.includes('/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/'), 'state lives outside Documents')
+  assert(plist.includes('/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/POLL_KEY'), 'poll key lives outside Documents')
   assert(poll.includes('WHOLESALE_QUEUE = "Brother_HL_L3280CDW_series"'), 'poller queue constant')
   assert(!poll.includes('lp", "-d", "'), 'lp destination is the checked printer variable')
+}
+
+function captureRes() {
+  return {
+    statusCode: 0,
+    body: null,
+    status(code) {
+      this.statusCode = code
+      return this
+    },
+    json(body) {
+      this.body = body
+      return this
+    }
+  }
+}
+
+async function testWholesalePullPollAuth() {
+  const { authorizeBridge, authorizeWholesalePullPoll, isBridgeAuthorized } = await import('../lib/bridge-auth.js')
+  const prevBridge = process.env.BRIDGE_API_KEY
+  const prevPoll = process.env.WHOLESALE_PULL_POLL_KEY
+  const bridge = 'bridge-key-test-value'
+  const poll = 'poll-key-test-value'
+  const bearer = key => ({ headers: { authorization: `Bearer ${key}` } })
+  const alt = key => ({ headers: { 'x-bridge-key': key } })
+  try {
+    process.env.BRIDGE_API_KEY = bridge
+    process.env.WHOLESALE_PULL_POLL_KEY = poll
+    assert(authorizeWholesalePullPoll(bearer(poll), captureRes()) === true, 'poll key opens sheets')
+    assert(authorizeWholesalePullPoll(bearer(bridge), captureRes()) === true, 'bridge key still opens sheets')
+    assert(authorizeWholesalePullPoll(alt(poll), captureRes()) === true, 'poll key via x-bridge-key')
+    const wrong = captureRes()
+    assert(authorizeWholesalePullPoll(bearer('nope'), wrong) === false, 'wrong key rejected')
+    assert(wrong.statusCode === 401, 'wrong poll key is 401')
+    const bridgeRes = captureRes()
+    assert(authorizeBridge(bearer(poll), bridgeRes) === false, 'poll key does not open the bridge')
+    assert(bridgeRes.statusCode === 401, 'poll key on the bridge is 401')
+    assert(isBridgeAuthorized(bearer(poll)) === false, 'poll key is not bridge-authorized')
+    assert(isBridgeAuthorized(bearer(bridge)) === true, 'bridge key is still bridge-authorized')
+
+    delete process.env.BRIDGE_API_KEY
+    assert(authorizeWholesalePullPoll(bearer(poll), captureRes()) === true, 'poll key alone opens sheets')
+    const noBridge = captureRes()
+    assert(authorizeWholesalePullPoll(bearer(bridge), noBridge) === false, 'unset bridge key is not a sheets fallback')
+    assert(noBridge.statusCode === 401, 'missing bridge fallback is 401')
+
+    delete process.env.WHOLESALE_PULL_POLL_KEY
+    process.env.BRIDGE_API_KEY = bridge
+    assert(authorizeWholesalePullPoll(bearer(bridge), captureRes()) === true, 'bridge key alone opens sheets')
+    const noPoll = captureRes()
+    assert(authorizeWholesalePullPoll(bearer(poll), noPoll) === false, 'absent poll key is not accepted')
+    assert(noPoll.statusCode === 401, 'absent poll key is 401')
+
+    delete process.env.BRIDGE_API_KEY
+    const missing = captureRes()
+    assert(authorizeWholesalePullPoll(bearer(poll), missing) === false, 'unset keys fail closed')
+    assert(missing.statusCode === 503 && missing.body.error === 'Wholesale pull poll is not configured', JSON.stringify(missing.body))
+  } finally {
+    if (prevBridge === undefined) delete process.env.BRIDGE_API_KEY
+    else process.env.BRIDGE_API_KEY = prevBridge
+    if (prevPoll === undefined) delete process.env.WHOLESALE_PULL_POLL_KEY
+    else process.env.WHOLESALE_PULL_POLL_KEY = prevPoll
+  }
 }
 
 async function main() {
@@ -1427,6 +1508,7 @@ async function main() {
   await testStoreUpdateMissFailsClosed()
   await testTodoistOAuthFlow()
   testPollerCopies()
+  await testWholesalePullPollAuth()
   console.log('verify-wholesale-pull: ok')
 }
 

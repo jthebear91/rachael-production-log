@@ -7,11 +7,14 @@
     mkdir -p "$HOME/Library/Application Support/RachaelsWholesalePull/pull-sheets" \
              "$HOME/Library/Application Support/RachaelsWholesalePull/logs"
     cp scripts/wholesale-pull-mac-poll.sh "$HOME/Library/Application Support/RachaelsWholesalePull/"
-    printf '%s' "<BRIDGE_API_KEY>" > "$HOME/Library/Application Support/RachaelsWholesalePull/BRIDGE_API_KEY"
-    chmod 600 "$HOME/Library/Application Support/RachaelsWholesalePull/BRIDGE_API_KEY"
+    printf '%s' "<WHOLESALE_PULL_POLL_KEY>" > "$HOME/Library/Application Support/RachaelsWholesalePull/POLL_KEY"
+    chmod 600 "$HOME/Library/Application Support/RachaelsWholesalePull/POLL_KEY"
     cp scripts/com.rachaelsseafood.wholesale-pull-poll.plist ~/Library/LaunchAgents/
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.rachaelsseafood.wholesale-pull-poll.plist
-  Everything lives under ~/Library/Application Support so TCC never blocks it.
+  The poll key is not BRIDGE_API_KEY. That secret is used elsewhere and cannot be
+  read back, so it is not copied onto this Mac. An equivalent file is
+  /Users/Shared/RachaelsWholesalePull/poll.key, also mode 600 and outside ~/Documents.
+  Everything else lives under ~/Library/Application Support so TCC never blocks it.
 -->
 <plist version="1.0">
 <dict>
@@ -24,8 +27,8 @@
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>BRIDGE_API_KEY_FILE</key>
-    <string>/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/BRIDGE_API_KEY</string>
+    <key>WHOLESALE_PULL_POLL_KEY_FILE</key>
+    <string>/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/POLL_KEY</string>
     <key>WHOLESALE_PULL_DEST</key>
     <string>/Users/rachaelsseafood/Library/Application Support/RachaelsWholesalePull/pull-sheets</string>
     <key>WHOLESALE_PULL_PRINTER</key>

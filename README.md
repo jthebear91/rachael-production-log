@@ -16,19 +16,25 @@ Daily production logging app for Rachael's Wholesale LLC.
 | `SQUARE_MAURICE_LOCATION_ID` | Square location for Maurice cafe |
 | `SQUARE_RESTAURANT_TOKEN` | Legacy Maurice token (`account=restaurant` alias). Used if `SQUARE_MAURICE_TOKEN` is unset. |
 | `SQUARE_RESTAURANT_LOCATION_ID` | Legacy Maurice location. Used if `SQUARE_MAURICE_LOCATION_ID` is unset. |
-| `BRIDGE_API_KEY` | Shared secret for `/api/square/*` (GET reads and `POST /api/square/invoices/create`), `POST /api/pick/maurice-restock/week-invoice`, and `POST /api/pick/maurice-restock/create`. Routes fail closed (503) if unset. |
+| `BRIDGE_API_KEY` | Shared secret for `/api/square/*` (GET reads and `POST /api/square/invoices/create`), `POST /api/pick/maurice-restock/week-invoice`, `POST /api/pick/maurice-restock/create`, and `POST /api/wholesale-pull/replay`. Routes fail closed (503) if unset. Sheets also accept it when it is set. Do not copy it onto the wholesale Mac. |
+| `WHOLESALE_PULL_POLL_KEY` | Dedicated secret for the Mac poller on `GET`/`POST /api/wholesale-pull/sheets` (list, PDF, print ack). Falls back to `BRIDGE_API_KEY` when unset. Does not authorize replay or other bridge routes. The Mac reads it from a mode 600 file outside `~/Documents`. |
 | `PICK_MINT_API_KEY` | Mint-only secret for `POST /api/pick/maurice-restock/create` (`Authorization: Bearer`). Set this on Vercel Production for Claude's nightly pick. It does not authorize Send, inventory, invoices, or other bridge routes. Use a different value from `BRIDGE_API_KEY`. |
 | `SALES_DASHBOARD_PIN` | Shared PIN for the sales dashboard (`/dashboard`) and sales-sensitive APIs (`/api/square/sales`, `/payments`, `/orders`). **Do not PIN the whole app** — Daily Log stays public. Unset in local development allows sales access. Unset in production (`VERCEL=1` or `NODE_ENV=production`) blocks sales and shows “PIN not configured” on `/sales-login`. |
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase Project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase Publishable Key |
 | `SUPABASE_SERVICE_KEY` | Supabase service role key for Batch Tracker writes and Maurice pick tokens. Server-only. |
 | `APP_BASE_URL` | Public origin encoded in Maurice pick QR codes. Defaults to `https://rachael-production-log.vercel.app` in production. |
-| `SQUARE_MAURICE_CUSTOMER_ID` | Maurice's customer id on the **wholesale** Square account. Optional. Used by the Monday unpaid rollup. Default `TQ8JFGXMZGTY8JNKCY1TV72618`. |
+| `SQUARE_MAURICE_CUSTOMER_ID` | Maurice's customer id on the **wholesale** Square account. Optional. Used by the Monday unpaid rollup. Default `TQ8JFGXMZGTY8JNKCY1TV72618`. Wholesale-pull excludes this customer, and that default id, so the rollup invoice does not create a Takeout task. The rollup is due 14 America/Chicago days after creation and bills the latest live Send per calendar day. |
 | `MAURICE_PICK_SEND_DRY_RUN` | Default on (unset counts as on). Send records the pull, appends the week log, and logs the intended `IN_STOCK` → `SOLD` adjustment. It does not call `inventory.batchChange` and it does not create an invoice. Set to `0` only together with `MAURICE_PICK_LIVE_DEDUCT=1`, after the Claude step 7 edit. |
 | `MAURICE_PICK_LIVE_DEDUCT` | Default off. Set to `1` with `MAURICE_PICK_SEND_DRY_RUN=0` to deduct final quantities at wholesale location `L6D106R4VNA72`. |
 | `JORDAN_NOTIFY_WEBHOOK` | Optional URL for the post-pull total and shorts. Not Twilio. |
 | `TODOIST_TOKEN` | Todoist API Token |
 | `TODOIST_COOK_PROJECT_ID` | Todoist Cook Board Project ID (optional) |
+| `TODOIST_TAKEOUT_PROJECT_ID` | Todoist Takeout project for wholesale pull tasks (`6cv69FrQF2QcqVqw`). Required for the Square pull webhook. Do not set this to the Package project. |
+| `WHOLESALE_PULL_ENABLED` | Set to `1` to create Takeout tasks from the Square webhook and to queue a signature invoice when that task is checked off. Unset skips both webhooks after the signature check. |
+| `TODOIST_WEBHOOK_SECRET` | Todoist app client secret for `POST /api/wholesale-pull/todoist-webhook` (`item:completed`). Not the API token. Webhook returns 503 if unset (except a non-production dev bypass). |
+| `SQUARE_WEBHOOK_SIGNATURE_KEY` | Square webhook signature key. Webhook returns 503 if unset (except a non-production dev bypass). |
+| `SQUARE_WEBHOOK_NOTIFICATION_URL` | Exact webhook URL registered in Square. Defaults to the request URL when unset. |
 | `TWILIO_ACCOUNT_SID` | Twilio account for the wholesale text webhook. Webhook returns 503 if this and `TWILIO_AUTH_TOKEN` are unset (except a non-production dev bypass). |
 | `TWILIO_AUTH_TOKEN` | Twilio auth token used to validate `X-Twilio-Signature`. |
 | `TWILIO_FROM_NUMBER` | Outbound crew SMS from-number. Leave unset until the Google Voice port finishes. |
@@ -48,4 +54,5 @@ The Daily Log at `/` stays open. Only Sales (`/dashboard` and APIs that return r
 - Read-only Square bridge for assistants (`GET /api/square/*`) — see [docs/square-bridge.md](docs/square-bridge.md)
 - Unpaid wholesale invoices from text (`POST /api/square/invoices/create` and the Twilio inbound stub) — see [docs/wholesale-text-orders.md](docs/wholesale-text-orders.md)
 - Maurice nightly pick QR (daily Send is inventory plus a week log, dry-run until both live flags are set; Monday rolls the prior Mon–Sat into one unpaid wholesale invoice) — see [docs/maurice-restock-pick-qr.md](docs/maurice-restock-pick-qr.md)
+- Wholesale Square invoices and house-account receipts → Todoist **Takeout** pull task (p1, due today in America/Chicago, top of the board) and a qty/name pick-list PDF with a WHOLESALE banner. Checking off that task queues a separate signature invoice PDF (prices, total, signature line). The wholesale Mac (user `rachaelsseafood`, IOPlatformUUID `9670DC09-2362-51D4-8476-38D5001BD500`) prints both files only on `Brother_HL_L3280CDW_series` (signature invoices 2 copies, pick lists 1). The LaunchAgent keeps its files outside `~/Documents`. See [docs/wholesale-pull.md](docs/wholesale-pull.md)
 - Sales dashboard at `/dashboard` (today / WTD / MTD per location, America/Chicago). Gated by `SALES_DASHBOARD_PIN`; Daily Log is not.

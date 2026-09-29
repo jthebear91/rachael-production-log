@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { HIDDEN_CATEGORIES } from '../lib/hidden-categories'
-import { initialCaseSelection } from '../lib/case-match'
+import { initialCaseSelection } from '../lib/case-matches'
 
 export default function App() {
   // ── SCREEN ─────────────────────────────────────
@@ -112,8 +112,9 @@ export default function App() {
   // Once you've picked which Todoist batch(es) you're logging, look up which
   // Square case items look like the same product (e.g. a frozen 12ct case
   // AND a fresh restaurant case for the same recipe) so you can say exactly
-  // which one this batch became. Defaults to whichever case you picked last
-  // time for this same item, if we have one on file.
+  // which one this batch became. A saved finish item is pre-selected when
+  // it is one of the matches. A single match (tilt-skillet Potato Salad, or
+  // Pass Chicken → Chicken Breast) is filled in even when nothing was saved.
   useEffect(() => {
     if (!selectedTodoistItemName) {
       setCaseMatches([])

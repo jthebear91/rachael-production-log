@@ -11,10 +11,12 @@
 // hidden from the Daily Log's category row.
 //
 // Pork Roast also gets the existing Brown Gravy catalog item as a second
-// choice (see lib/case-matches.js). Other task names are unchanged.
+// choice. A tilt-skillet Potato Salad title resolves to Potato Salad
+// variation FLM4PLTWH5T5EDE6E5AD5H6Q. "Pass Chicken" / "past chicken"
+// resolve to the catalog name Chicken Breast. See lib/case-matches.js.
 import { fetchCatalog } from '../../lib/square-catalog'
 import { HIDDEN_CATEGORIES } from '../../lib/hidden-categories'
-import { selectCaseMatches } from '../../lib/case-matches'
+import { selectCaseMatches, visibleCatalogItems, withSavedMatch } from '../../lib/case-matches'
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).end()
@@ -28,7 +30,8 @@ export default async function handler(req, res) {
 
   try {
     const { items, categories } = await fetchCatalog()
-    const matches = selectCaseMatches(itemName, items, categories, HIDDEN_CATEGORIES)
+    const visibleItems = visibleCatalogItems(items, categories, HIDDEN_CATEGORIES)
+    let matches = selectCaseMatches(itemName, items, categories, HIDDEN_CATEGORIES)
 
     let lastUsed = null
     try {
@@ -45,6 +48,8 @@ export default async function handler(req, res) {
       // No mapping table yet, or lookup failed — just skip the default, the
       // matches list still works fine without it.
     }
+
+    matches = withSavedMatch(matches, lastUsed, visibleItems)
 
     res.status(200).json({ matches, lastUsed })
   } catch (e) {

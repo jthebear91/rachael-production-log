@@ -6,7 +6,11 @@ const {
   todoistMatchWords,
   withSavedMatch,
   visibleCatalogItems,
-  POTATO_SALAD_VARIATION_ID
+  POTATO_SALAD_VARIATION_ID,
+  SM_OKRA_2QT_VARIATION_ID,
+  SM_OKRA_2QT_NAME,
+  SM_OKRA_6QT_VARIATION_ID,
+  SM_OKRA_6QT_NAME
 } = require('../lib/case-matches')
 
 function assert(cond, msg) {
@@ -35,7 +39,8 @@ const categories = [
   { id: 'freezer', name: 'Wholesale Freezer' },
   { id: 'dry', name: 'Dry Goods' },
   { id: 'veg', name: 'Vegetables' },
-  { id: 'walkin', name: 'Walk-in Freezer' }
+  { id: 'walkin', name: 'Walk-in Freezer' },
+  { id: 'rawfrozen', name: 'Raw Goods (frozen)' }
 ]
 
 // Ids and names copied from the live wholesale Daily Log catalog.
@@ -131,8 +136,8 @@ const FINISH_ITEMS = items.concat([
   { variationId: 'var-russet', name: 'Russet Potatoes (case)', categoryIds: ['walkin'] },
   { variationId: 'var-meatballs', name: 'Meatballs (Bucket)', categoryIds: ['walkin'] },
   { variationId: 'var-meatball-stew', name: 'Meatball Stew (6)', categoryIds: ['six'] },
-  { variationId: 'var-okra-2', name: 'Smothered Okra (2qt)', categoryIds: ['six'] },
-  { variationId: 'var-okra-6', name: 'Smothered Okra (6qt)', categoryIds: ['six'] },
+  { variationId: SM_OKRA_2QT_VARIATION_ID, name: SM_OKRA_2QT_NAME, categoryIds: ['walkin'] },
+  { variationId: SM_OKRA_6QT_VARIATION_ID, name: SM_OKRA_6QT_NAME, categoryIds: ['rawfrozen'] },
   { variationId: 'var-shrimp-12', name: 'Stuffed Shrimp (12)', categoryIds: ['box'] },
   { variationId: 'var-shrimp-heb', name: 'Stuffed Shrimp (12) HEBERTS', categoryIds: ['box'] },
   { variationId: 'var-chicken-breast', name: 'Chicken Breast', categoryIds: ['walkin'] },
@@ -224,7 +229,7 @@ function testNoiseDoesNotCollapseOtherSkus() {
 
   const okra = namesFor('Smothered Okra (2qt)')
   assert(okra[0] === 'Smothered Okra (2qt)', `okra top ${okra[0]}`)
-  assert(okra[1] === 'Smothered Okra (6qt)', '6qt still a lower match')
+  assert(okra[1] === 'Smothered Okra (6qt)', '6qt is the other smothered okra output')
 
   const gumbo = namesFor('Seafood Gumbo (cafe) TILT')
   assert(gumbo[0] === 'Seafood Gumbo (Cafe)', `gumbo top ${gumbo[0]}`)
@@ -281,6 +286,95 @@ function testSavedFinishItemPopulates() {
   assert(sole.name === 'Potato Salad', 'stale mapping name is not used')
 }
 
+function testSmotheredOkraOffersBothSizes() {
+  const titles = [
+    '1 batch smothered okra TILT',
+    'smothered okra TILT',
+    'Smothered Okra',
+    'smothered okra',
+    'SMOTHERED OKRA tilt',
+    'sm okra',
+    'Sm Okra',
+    'sm okra TILT',
+    'SM OKRA',
+    '2 batches smothered okra',
+    '3 batches of sm okra TILT',
+    '1 batch of smothered okra',
+    '1-batch sm okra TILT'
+  ]
+  for (const title of titles) {
+    const matches = selectCaseMatches(title, FINISH_ITEMS, categories, HIDDEN)
+    assert(matches.length === 2, `${title} should offer two outputs, got ${matches.map(m => m.name).join(', ')}`)
+    assert(matches[0].name === SM_OKRA_2QT_NAME, `${title} keeps 2qt first (${matches[0] && matches[0].name})`)
+    assert(matches[0].variationId === SM_OKRA_2QT_VARIATION_ID, `${title} 2qt variation`)
+    assert(matches[1].name === SM_OKRA_6QT_NAME, `${title} second choice is the catalog name`)
+    assert(matches[1].variationId === SM_OKRA_6QT_VARIATION_ID, `${title} 6qt variation`)
+    assert(!matches.some(m => m.name === 'Shrimp and Okra (6)' || m.name === 'Okra (bulk)'), `${title} does not pick other okra`)
+    const selected = initialCaseSelection(matches, null)
+    assert(selected.variationId === '', `${title} has two outputs and is not auto-picked`)
+  }
+
+  const saved = { variationId: SM_OKRA_2QT_VARIATION_ID, name: SM_OKRA_2QT_NAME }
+  const ranked = selectCaseMatches('smothered okra TILT', FINISH_ITEMS, categories, HIDDEN)
+  const visible = visibleCatalogItems(FINISH_ITEMS, categories, HIDDEN)
+  const withSaved = withSavedMatch(ranked, saved, visible)
+  assert(withSaved.length === 2, 'saved 2qt does not drop the 6qt button')
+  assert(withSaved.some(m => m.variationId === SM_OKRA_6QT_VARIATION_ID), '6qt stays beside the saved 2qt')
+  const selected = initialCaseSelection(withSaved, saved)
+  assert(selected.variationId === SM_OKRA_2QT_VARIATION_ID, 'last logged 2qt stays pre-selected')
+  assert(selected.name === SM_OKRA_2QT_NAME, 'pre-selected name is the 2qt catalog name')
+}
+
+function testSmotheredOkraDoesNotInventOrLeak() {
+  const renamed = FINISH_ITEMS.map(i => i.variationId === SM_OKRA_6QT_VARIATION_ID ? { ...i, name: 'Sm Okra (6qt)' } : i)
+  const renamedMatches = selectCaseMatches('1 batch smothered okra TILT', renamed, categories, HIDDEN)
+  assert(renamedMatches.length === 1 && renamedMatches[0].variationId === SM_OKRA_2QT_VARIATION_ID, 'renamed 6qt variation is not offered')
+  assert(!renamedMatches.some(m => m.name === 'Sm Okra (6qt)'), 'a guessed short name is not substituted')
+
+  const missing = FINISH_ITEMS.filter(i => i.variationId !== SM_OKRA_6QT_VARIATION_ID)
+  missing.push({ variationId: 'SOME_OTHER_SM_OKRA_6QT', name: SM_OKRA_6QT_NAME, categoryIds: ['rawfrozen'] })
+  const fallback = selectCaseMatches('smothered okra TILT', missing, categories, HIDDEN)
+  assert(!fallback.some(m => m.variationId === SM_OKRA_6QT_VARIATION_ID), 'a missing 6qt variation id is not invented')
+  assert(!fallback.some(m => m.variationId === 'SOME_OTHER_SM_OKRA_6QT'), 'a different hidden 6qt variation is not a substitute')
+  assert(fallback.some(m => m.variationId === SM_OKRA_2QT_VARIATION_ID), '2qt still matches')
+
+  const visibleOther = FINISH_ITEMS.filter(i => i.variationId !== SM_OKRA_6QT_VARIATION_ID)
+  visibleOther.push({ variationId: 'SOME_OTHER_SM_OKRA_6QT', name: SM_OKRA_6QT_NAME, categoryIds: ['six'] })
+  const visibleFallback = selectCaseMatches('sm okra', visibleOther, categories, HIDDEN)
+  assert(!visibleFallback.some(m => m.variationId === SM_OKRA_6QT_VARIATION_ID), 'sm okra does not invent the missing 6qt id')
+  assert(visibleFallback.some(m => m.variationId === SM_OKRA_2QT_VARIATION_ID && m.name === SM_OKRA_2QT_NAME), 'sm okra still pins the real 2qt')
+
+  const renamed2 = FINISH_ITEMS.map(i => i.variationId === SM_OKRA_2QT_VARIATION_ID ? { ...i, name: 'Okra (bulk)' } : i)
+  const shortTitle = selectCaseMatches('sm okra TILT', renamed2, categories, HIDDEN)
+  assert(!shortTitle.some(m => m.variationId === SM_OKRA_2QT_VARIATION_ID), 'renamed 2qt is not offered for sm okra')
+  assert(shortTitle.some(m => m.variationId === SM_OKRA_6QT_VARIATION_ID && m.name === SM_OKRA_6QT_NAME), '6qt still offered when 2qt was renamed')
+
+  const shrimpCatalog = FINISH_ITEMS.concat([
+    { variationId: 'DXANQZHIN76B6KVQMPFRDOEH', name: 'Shrimp and Okra (6)', categoryIds: ['six'] },
+    { variationId: 'ZNZF2TH6IYKNT7XMKIVTL364', name: 'Okra (bulk)', categoryIds: ['rawfrozen'] }
+  ])
+  for (const title of ['Shrimp and Okra', 'Shrimp and Okra TILT - 1 batch', 'shrimp and okra', 'Okra (bulk)', 'okra']) {
+    const matches = selectCaseMatches(title, shrimpCatalog, categories, HIDDEN)
+    assert(!matches.some(m => m.variationId === SM_OKRA_6QT_VARIATION_ID), `${title} does not gain hidden 6qt smothered okra`)
+  }
+  const shrimp = selectCaseMatches('Shrimp and Okra TILT', shrimpCatalog, categories, HIDDEN)
+  assert(shrimp.some(m => m.name === 'Shrimp and Okra (6)'), 'shrimp and okra still name-matches its own case')
+  assert(!shrimp.some(m => m.variationId === SM_OKRA_2QT_VARIATION_ID), 'shrimp and okra is not smothered okra')
+
+  const pies = selectCaseMatches('Crawfish Pies TILT', FINISH_ITEMS, categories, HIDDEN)
+  assert(!pies.some(m => m.variationId === SM_OKRA_2QT_VARIATION_ID || m.variationId === SM_OKRA_6QT_VARIATION_ID), 'pies do not get smothered okra')
+
+  const pork = selectCaseMatches('Pork Roast TILT', FINISH_ITEMS, categories, HIDDEN)
+  assert(!pork.some(m => m.variationId === SM_OKRA_6QT_VARIATION_ID), 'pork roast does not get smothered okra')
+  assert(pork.some(m => m.variationId === '4JVU7IFKXD3C4FTQWMOOZPO5'), 'pork roast still offers brown gravy')
+
+  const visibleBoth = FINISH_ITEMS.map(i => i.variationId === SM_OKRA_6QT_VARIATION_ID ? { ...i, categoryIds: ['six'] } : i)
+  const once = selectCaseMatches('smothered okra TILT', visibleBoth, categories, HIDDEN)
+  const sixes = once.filter(m => m.variationId === SM_OKRA_6QT_VARIATION_ID)
+  assert(sixes.length === 1, 'visible 6qt is listed once')
+  assert(once.filter(m => m.variationId === SM_OKRA_2QT_VARIATION_ID).length === 1, '2qt is listed once')
+}
+
 function testPastChickenAlias() {
   const titles = [
     'past chicken',
@@ -329,5 +423,7 @@ testPotatoSaladDoesNotInventVariation()
 testNoiseDoesNotCollapseOtherSkus()
 testPorkRoastStillOfferedBesidePotatoSalad()
 testSavedFinishItemPopulates()
+testSmotheredOkraOffersBothSizes()
+testSmotheredOkraDoesNotInventOrLeak()
 testPastChickenAlias()
 console.log('verify-case-matches: ok')

@@ -11,7 +11,9 @@
 // hidden from the Daily Log's category row.
 //
 // Pork Roast also gets the existing Brown Gravy catalog item as a second
-// choice. A tilt-skillet Potato Salad title resolves to Potato Salad
+// choice. A smothered-okra task (including "sm okra", with or without
+// TILT or a batch count) offers both Smothered Okra (2qt) and Smothered
+// Okra (6qt). A tilt-skillet Potato Salad title resolves to Potato Salad
 // variation FLM4PLTWH5T5EDE6E5AD5H6Q. "Pass Chicken" / "past chicken"
 // resolve to the catalog name Chicken Breast. See lib/case-matches.js.
 import { fetchCatalog } from '../../lib/square-catalog'

@@ -1,4 +1,11 @@
+import { useEffect, useState } from 'react'
 import { formatUsdFromCents } from '../lib/chicago-time'
+import {
+  formatFridgeQty,
+  FRIDGE_REFRESH_MS,
+  isNegativeFridgeQty
+} from '../lib/gumbo-fridge-display'
+import { loadGumboFridge } from '../lib/gumbo-fridge'
 import { isPinConfigured, isSalesAuthenticated } from '../lib/sales-auth'
 import { loadDashboardSales } from '../lib/square-sales'
 
@@ -44,8 +51,100 @@ async function signOutOfSales() {
   window.location.assign('/sales-login')
 }
 
-export default function Dashboard({ payload, showSignOut }) {
+async function refreshFridge(setFridge) {
+  try {
+    const res = await fetch('/api/gumbo-fridge', { cache: 'no-store' })
+    if (!res.ok) return
+    const body = await res.json()
+    if (body && body.data) setFridge(body.data)
+  } catch {
+    // Keep the last strip. Sales totals stay as loaded.
+  }
+}
+
+function FridgeQty({ quantity }) {
+  const text = formatFridgeQty(quantity)
+  const negative = isNegativeFridgeQty(quantity)
+  return (
+    <td style={{
+      ...s.td,
+      textAlign: 'right',
+      fontVariantNumeric: 'tabular-nums',
+      fontWeight: 700,
+      color: negative ? 'var(--red)' : (text === '—' ? '#888' : 'inherit')
+    }}>
+      {text}
+    </td>
+  )
+}
+
+function FridgeStrip({ fridge, timezone }) {
+  const sides = fridge?.sides || []
+  if (!sides.length) {
+    return (
+      <section style={s.fridge}>
+        <div style={s.combinedLabel}>Cafe gumbo fridge</div>
+        <p style={s.fridgeNote}>
+          Fridge counts are unavailable right now. Sales totals above are unchanged.
+        </p>
+      </section>
+    )
+  }
+
+  return (
+    <section style={s.fridge}>
+      <div style={s.combinedLabel}>Cafe gumbo fridge</div>
+      <p style={s.fridgeNote}>
+        Fresh cafe containers, in the units Square stores. Wholesale Gumbo Cooler is live Square.
+        Maurice counts update from the nightly order scan-in.
+        {fridge.loadedAt ? ` Checked ${asOfLabel(fridge.loadedAt, timezone)}.` : ''}
+        {' '}This strip refreshes every 5 minutes.
+      </p>
+      <div style={s.fridgeGrid}>
+        {sides.map(side => (
+          <div key={side.account} style={s.fridgeCard}>
+            <div style={s.fridgeHead}>
+              <div>
+                <div style={s.locName}>{side.title}</div>
+                <div style={s.locId}>{side.detail}</div>
+                <div style={s.locId}>{side.source}</div>
+              </div>
+              {!side.configured && <span style={s.badgeMuted}>Not configured</span>}
+              {side.configured && side.error && <span style={s.badgeErr}>{side.error}</span>}
+            </div>
+            <table style={s.fridgeTable}>
+              <thead>
+                <tr>
+                  <th style={s.th}>Item</th>
+                  <th style={{ ...s.th, textAlign: 'right' }}>On hand</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(side.items || []).map((item, i) => (
+                  <tr key={item.key} style={{ background: i % 2 === 0 ? '#fff' : 'var(--bg)' }}>
+                    <td style={s.td}>{item.label}</td>
+                    <FridgeQty quantity={item.quantity} />
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+export default function Dashboard({ payload, fridge: fridgeFromServer, showSignOut }) {
   const { accounts = [], combined = {}, timezone, weekStartsOn, asOf } = payload || {}
+  const [fridge, setFridge] = useState(fridgeFromServer || null)
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      refreshFridge(setFridge)
+    }, FRIDGE_REFRESH_MS)
+    return () => clearInterval(timer)
+  }, [])
 
   return (
     <div style={s.page}>
@@ -137,6 +236,8 @@ export default function Dashboard({ payload, showSignOut }) {
             </tbody>
           </table>
         </section>
+
+        <FridgeStrip fridge={fridge} timezone={timezone} />
       </main>
     </div>
   )
@@ -147,8 +248,11 @@ export async function getServerSideProps({ req, res }) {
   if (!isSalesAuthenticated(req)) {
     return { redirect: { destination: '/sales-login', permanent: false } }
   }
-  const payload = await loadDashboardSales()
-  return { props: { payload, showSignOut: isPinConfigured() } }
+  const [payload, fridge] = await Promise.all([
+    loadDashboardSales(),
+    loadGumboFridge().catch(() => null)
+  ])
+  return { props: { payload, fridge, showSignOut: isPinConfigured() } }
 }
 
 const s = {
@@ -221,5 +325,27 @@ const s = {
   badgeWarn: {
     display: 'inline-block', fontSize: 12, fontWeight: 600, color: '#8a5a00',
     background: '#fff4d6', borderRadius: 999, padding: '4px 10px'
-  }
+  },
+  fridge: { marginTop: 28 },
+  fridgeNote: { fontSize: 13, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 14 },
+  fridgeGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))',
+    gap: 12
+  },
+  fridgeCard: {
+    background: '#fff',
+    border: '1px solid var(--border)',
+    borderRadius: 10,
+    overflow: 'hidden'
+  },
+  fridgeHead: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+    padding: '14px 16px 12px',
+    borderBottom: '1px solid var(--border)'
+  },
+  fridgeTable: { width: '100%', borderCollapse: 'collapse' }
 }

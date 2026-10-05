@@ -48,9 +48,11 @@ async function testQtySelection() {
 async function testCatalogScope() {
   const { FRIDGE_SIDES } = await import('../lib/gumbo-fridge.js')
   assert(FRIDGE_SIDES.length === 2, 'two fridge columns')
-  const wholesale = FRIDGE_SIDES.find(side => side.account === 'wholesale')
-  const maurice = FRIDGE_SIDES.find(side => side.account === 'maurice')
-  assert(wholesale && maurice, 'wholesale and maurice sides')
+  const wholesale = FRIDGE_SIDES.find(side => side.title === 'Wholesale · Gumbo Cooler')
+  const maurice = FRIDGE_SIDES.find(side => side.title === 'Maurice · Inventory SKUs')
+  assert(wholesale && maurice, 'wholesale cooler and maurice inventory columns')
+  assert(wholesale.account === 'wholesale', 'cooler stays on the wholesale account')
+  assert(maurice.account === 'wholesale', 'maurice fridge loads from the wholesale account')
   assert(wholesale.items.length === 5 && maurice.items.length === 5, 'five variations each')
 
   const wholesaleIds = wholesale.items.map(item => item.catalogObjectId)
@@ -63,32 +65,48 @@ async function testCatalogScope() {
     '6G4Y6H3OOUBOFGOYHKSTKSUN'
   ].join(','), 'wholesale cafe variation ids')
   assert(mauriceIds.join(',') === [
-    'G6ENNHTUE6JSKCW2B2DV4UY5',
-    'O4DZAMPPR6SWJU5CI43K6US3',
-    'ZVDGZDNACBXTQ3VHHLYJ2VCE',
-    'GC24OZBR7VZJ3H7FZ76LMPTK',
-    'D45HAYSIM2WUSWD6TGGZ32BG'
-  ].join(','), 'maurice inventory variation ids')
-  assert(new Set([...wholesaleIds, ...mauriceIds]).size === 10, 'ids are not shared across accounts')
+    'AOETTPKX4HDGAECC6JEYCMLQ',
+    'TYC37BA4GITAY5ZXWPWVOK4T',
+    'WJ3VTZOM5EIGQOAOG4I7IA4Q',
+    'DCIJMUOYFK6T3ATTWEB7RN3U',
+    '224MN7JX6PDKRHUNAVNEAOPY'
+  ].join(','), 'wholesale inventory variation ids for the maurice column')
+  assert(new Set([...wholesaleIds, ...mauriceIds]).size === 10, 'cafe and inventory variation ids do not overlap')
   for (const side of FRIDGE_SIDES) {
     assert(side.items.map(item => item.label).join('|') === 'Chicken & Sausage|Seafood|Shrimp & Okra|Signature|Bisque', 'friendly labels')
   }
+  assert(wholesale.title === 'Wholesale · Gumbo Cooler', 'cooler title')
+  assert(wholesale.detail === 'Fresh cafe containers', 'cooler detail')
   assert(wholesale.source === 'Live Square', 'wholesale source copy')
+  assert(maurice.title === 'Maurice · Inventory SKUs', 'maurice title')
+  assert(maurice.detail === 'Wholesale Inventory catalog (nightly order)', 'maurice detail names the wholesale inventory catalog')
   assert(maurice.source === 'Updated by the nightly order scan-in', 'maurice source copy')
   const fs = require('fs')
   const path = require('path')
   const retired = ['ott', 'er'].join('')
+  const root = path.join(__dirname, '..')
   for (const rel of ['lib/gumbo-fridge.js', 'lib/gumbo-fridge-display.js', 'pages/dashboard.js', 'pages/api/gumbo-fridge.js', 'README.md']) {
-    const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8').toLowerCase()
+    const text = fs.readFileSync(path.join(root, rel), 'utf8').toLowerCase()
     assert(!text.includes(retired), `${rel} does not name the retired sync`)
   }
+  const dashboard = fs.readFileSync(path.join(root, 'pages/dashboard.js'), 'utf8')
+  const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8')
+  assert(
+    dashboard.includes('Maurice shows the wholesale Inventory catalog updated by the nightly order scan-in.'),
+    'dashboard attributes the maurice column to the wholesale inventory catalog'
+  )
+  assert(
+    readme.includes('The Maurice column reads wholesale Inventory catalog counts written by the nightly order scan-in.'),
+    'readme attributes the maurice column to the wholesale inventory catalog'
+  )
+  assert(dashboard.includes('key={side.title}'), 'fridge cards stay distinct when both columns use wholesale')
 }
 
-function stubDeps(squareFetch, { wholesaleConfigured = true, mauriceConfigured = true } = {}) {
-  const locations = { wholesale: 'LOC_W', maurice: 'LOC_M' }
+function stubDeps(squareFetch, { wholesaleConfigured = true } = {}) {
+  const locations = { wholesale: 'LOC_W' }
   return {
     peekAccount(id) {
-      const configured = id === 'maurice' ? mauriceConfigured : wholesaleConfigured
+      const configured = id === 'wholesale' ? wholesaleConfigured : false
       return {
         account: id,
         label: id,
@@ -137,41 +155,48 @@ async function testLoad() {
       return { counts: [inStock(wholesaleIds[1], '6.00000', 'LOC_W')] }
     }
     assert(ids.join(',') === mauriceIds.join(','), 'maurice request is only the five inventory ids')
-    return { counts: [] }
+    assert(req.body.location_ids[0] === 'LOC_W', 'maurice inventory counts use the wholesale location')
+    return {
+      counts: [
+        inStock(mauriceIds[0], '2', 'LOC_W'),
+        inStock(mauriceIds[2], '1', 'LOC_W')
+      ]
+    }
   }))
 
-  const wholesale = loaded.sides.find(side => side.account === 'wholesale')
-  const maurice = loaded.sides.find(side => side.account === 'maurice')
+  const wholesale = loaded.sides.find(side => side.title === 'Wholesale · Gumbo Cooler')
+  const maurice = loaded.sides.find(side => side.title === 'Maurice · Inventory SKUs')
+  assert(wholesale.account === 'wholesale' && maurice.account === 'wholesale', 'both columns report the wholesale account')
   assert(wholesale.configured && !wholesale.error, 'wholesale loaded')
   assert(wholesale.items[0].quantity === '-3', 'negative wholesale count is kept')
   assert(wholesale.items[1].quantity === '6.00000', 'second page count is kept')
   assert(wholesale.items[2].quantity === null, 'variation with no row is null')
-  assert(maurice.configured && !maurice.error, 'maurice loaded with an empty count list')
-  assert(maurice.items.every(item => item.quantity === null), 'no count row is null, not zero')
-  assert(calls.length === 3, 'two wholesale pages plus one maurice request')
+  assert(maurice.configured && !maurice.error, 'maurice column loaded from wholesale inventory ids')
+  assert(maurice.items[0].quantity === '2', 'chicken inventory count is kept')
+  assert(maurice.items[1].quantity === null, 'missing inventory row is null, not zero')
+  assert(maurice.items[2].quantity === '1', 'shrimp inventory count is kept')
+  assert(calls.length === 3, 'two cooler pages plus one inventory request')
 
   let fetched = false
   const missing = await loadGumboFridge(stubDeps(async () => {
     fetched = true
     return { counts: [] }
-  }, { wholesaleConfigured: false, mauriceConfigured: true }))
-  const unconfigured = missing.sides.find(side => side.account === 'wholesale')
-  const stillMaurice = missing.sides.find(side => side.account === 'maurice')
-  assert(unconfigured.configured === false && unconfigured.error === null, 'missing token is not configured')
-  assert(unconfigured.items.every(item => item.quantity === null), 'unconfigured side has no fake zeros')
-  assert(stillMaurice.configured === true, 'the other side still loads')
-  assert(fetched, 'configured side still fetches')
+  }, { wholesaleConfigured: false }))
+  assert(missing.sides.length === 2, 'both columns still render')
+  assert(missing.sides.every(side => side.configured === false && side.error === null), 'missing wholesale token leaves both columns unconfigured')
+  assert(missing.sides.every(side => side.items.every(item => item.quantity === null)), 'unconfigured columns have no fake zeros')
+  assert(!fetched, 'neither column fetches without the wholesale token')
 
   const broken = await loadGumboFridge(stubDeps(async (req) => {
     if (req.body.catalog_object_ids[0] === wholesaleIds[0]) {
       throw new Error('Bearer sq0at-SECRET Square down')
     }
-    return { counts: [inStock(mauriceIds[3], '2', 'LOC_M')] }
+    return { counts: [inStock(mauriceIds[3], '2', 'LOC_W')] }
   }))
-  const failed = broken.sides.find(side => side.account === 'wholesale')
-  const ok = broken.sides.find(side => side.account === 'maurice')
-  assert(failed.configured === true && failed.error && !failed.error.includes('SECRET'), 'wholesale error is redacted')
-  assert(ok.items.find(item => item.key === 'signature').quantity === '2', 'maurice still returns when wholesale fails')
+  const failed = broken.sides.find(side => side.title === 'Wholesale · Gumbo Cooler')
+  const ok = broken.sides.find(side => side.title === 'Maurice · Inventory SKUs')
+  assert(failed.configured === true && failed.error && !failed.error.includes('SECRET'), 'cooler error is redacted')
+  assert(ok.items.find(item => item.key === 'signature').quantity === '2', 'maurice inventory still returns when the cooler request fails')
 }
 
 function captureRes() {

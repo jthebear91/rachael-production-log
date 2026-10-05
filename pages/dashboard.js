@@ -95,14 +95,14 @@ function FridgeStrip({ fridge, timezone }) {
     <section style={s.fridge}>
       <div style={s.combinedLabel}>Cafe gumbo fridge</div>
       <p style={s.fridgeNote}>
-        Fresh cafe containers, in the units Square stores. Wholesale Gumbo Cooler is live Square.
-        Maurice counts update from the nightly order scan-in.
+        On-hand counts in the units Square stores. Wholesale Gumbo Cooler is live Square.
+        Maurice shows the wholesale Inventory catalog updated by the nightly order scan-in.
         {fridge.loadedAt ? ` Checked ${asOfLabel(fridge.loadedAt, timezone)}.` : ''}
         {' '}This strip refreshes every 5 minutes.
       </p>
       <div style={s.fridgeGrid}>
         {sides.map(side => (
-          <div key={side.account} style={s.fridgeCard}>
+          <div key={side.title} style={s.fridgeCard}>
             <div style={s.fridgeHead}>
               <div>
                 <div style={s.locName}>{side.title}</div>

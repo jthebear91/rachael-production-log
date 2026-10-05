@@ -102,7 +102,7 @@ function FridgeStrip({ fridge, timezone }) {
       </p>
       <div style={s.fridgeGrid}>
         {sides.map(side => (
-          <div key={side.account} style={s.fridgeCard}>
+          <div key={side.id || side.account} style={s.fridgeCard}>
             <div style={s.fridgeHead}>
               <div>
                 <div style={s.locName}>{side.title}</div>

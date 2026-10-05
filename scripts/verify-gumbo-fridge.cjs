@@ -48,9 +48,10 @@ async function testQtySelection() {
 async function testCatalogScope() {
   const { FRIDGE_SIDES } = await import('../lib/gumbo-fridge.js')
   assert(FRIDGE_SIDES.length === 2, 'two fridge columns')
-  const wholesale = FRIDGE_SIDES.find(side => side.account === 'wholesale')
-  const maurice = FRIDGE_SIDES.find(side => side.account === 'maurice')
+  const wholesale = FRIDGE_SIDES.find(side => side.id === 'wholesale')
+  const maurice = FRIDGE_SIDES.find(side => side.id === 'maurice')
   assert(wholesale && maurice, 'wholesale and maurice sides')
+  assert(wholesale.account === 'wholesale' && maurice.account === 'wholesale', 'both columns read the wholesale Square account')
   assert(wholesale.items.length === 5 && maurice.items.length === 5, 'five variations each')
 
   const wholesaleIds = wholesale.items.map(item => item.catalogObjectId)
@@ -63,13 +64,13 @@ async function testCatalogScope() {
     '6G4Y6H3OOUBOFGOYHKSTKSUN'
   ].join(','), 'wholesale cafe variation ids')
   assert(mauriceIds.join(',') === [
-    'G6ENNHTUE6JSKCW2B2DV4UY5',
-    'O4DZAMPPR6SWJU5CI43K6US3',
-    'ZVDGZDNACBXTQ3VHHLYJ2VCE',
-    'GC24OZBR7VZJ3H7FZ76LMPTK',
-    'D45HAYSIM2WUSWD6TGGZ32BG'
-  ].join(','), 'maurice inventory variation ids')
-  assert(new Set([...wholesaleIds, ...mauriceIds]).size === 10, 'ids are not shared across accounts')
+    'AOETTPKX4HDGAECC6JEYCMLQ',
+    'TYC37BA4GITAY5ZXWPWVOK4T',
+    'WJ3VTZOM5EIGQOAOG4I7IA4Q',
+    'DCIJMUOYFK6T3ATTWEB7RN3U',
+    '224MN7JX6PDKRHUNAVNEAOPY'
+  ].join(','), 'maurice column uses wholesale Inventory variation ids')
+  assert(new Set([...wholesaleIds, ...mauriceIds]).size === 10, 'cafe and inventory ids stay distinct')
   for (const side of FRIDGE_SIDES) {
     assert(side.items.map(item => item.label).join('|') === 'Chicken & Sausage|Seafood|Shrimp & Okra|Signature|Bisque', 'friendly labels')
   }
@@ -84,21 +85,21 @@ async function testCatalogScope() {
   }
 }
 
-function stubDeps(squareFetch, { wholesaleConfigured = true, mauriceConfigured = true } = {}) {
-  const locations = { wholesale: 'LOC_W', maurice: 'LOC_M' }
+function stubDeps(squareFetch, { wholesaleConfigured = true } = {}) {
   return {
     peekAccount(id) {
-      const configured = id === 'maurice' ? mauriceConfigured : wholesaleConfigured
+      assert(id === 'wholesale', 'fridge columns resolve the wholesale Square account')
       return {
-        account: id,
-        label: id,
-        token: configured ? 'tok' : null,
-        locationId: configured ? locations[id] : null,
-        configured
+        account: 'wholesale',
+        label: 'wholesale',
+        token: wholesaleConfigured ? 'tok' : null,
+        locationId: wholesaleConfigured ? 'LOC_W' : null,
+        configured: wholesaleConfigured
       }
     },
     resolveAccount(id) {
-      return { account: id, token: 'tok', locationId: locations[id], configured: true }
+      assert(id === 'wholesale', 'resolveAccount stays on wholesale')
+      return { account: 'wholesale', token: 'tok', locationId: 'LOC_W', configured: true }
     },
     resolveLocationId(_query, account) {
       return account.locationId
@@ -137,41 +138,39 @@ async function testLoad() {
       return { counts: [inStock(wholesaleIds[1], '6.00000', 'LOC_W')] }
     }
     assert(ids.join(',') === mauriceIds.join(','), 'maurice request is only the five inventory ids')
+    assert(req.body.location_ids[0] === 'LOC_W', 'maurice inventory also uses wholesale location')
     return { counts: [] }
   }))
 
-  const wholesale = loaded.sides.find(side => side.account === 'wholesale')
-  const maurice = loaded.sides.find(side => side.account === 'maurice')
+  const wholesale = loaded.sides.find(side => side.id === 'wholesale')
+  const maurice = loaded.sides.find(side => side.id === 'maurice')
   assert(wholesale.configured && !wholesale.error, 'wholesale loaded')
   assert(wholesale.items[0].quantity === '-3', 'negative wholesale count is kept')
   assert(wholesale.items[1].quantity === '6.00000', 'second page count is kept')
   assert(wholesale.items[2].quantity === null, 'variation with no row is null')
   assert(maurice.configured && !maurice.error, 'maurice loaded with an empty count list')
   assert(maurice.items.every(item => item.quantity === null), 'no count row is null, not zero')
-  assert(calls.length === 3, 'two wholesale pages plus one maurice request')
+  assert(calls.length === 3, 'two cafe pages plus one inventory request')
 
   let fetched = false
   const missing = await loadGumboFridge(stubDeps(async () => {
     fetched = true
     return { counts: [] }
-  }, { wholesaleConfigured: false, mauriceConfigured: true }))
-  const unconfigured = missing.sides.find(side => side.account === 'wholesale')
-  const stillMaurice = missing.sides.find(side => side.account === 'maurice')
-  assert(unconfigured.configured === false && unconfigured.error === null, 'missing token is not configured')
-  assert(unconfigured.items.every(item => item.quantity === null), 'unconfigured side has no fake zeros')
-  assert(stillMaurice.configured === true, 'the other side still loads')
-  assert(fetched, 'configured side still fetches')
+  }, { wholesaleConfigured: false }))
+  assert(missing.sides.every(side => side.configured === false && side.error === null), 'missing wholesale token marks both columns not configured')
+  assert(missing.sides.every(side => side.items.every(item => item.quantity === null)), 'unconfigured sides have no fake zeros')
+  assert(!fetched, 'no Square fetch when wholesale is unconfigured')
 
   const broken = await loadGumboFridge(stubDeps(async (req) => {
     if (req.body.catalog_object_ids[0] === wholesaleIds[0]) {
       throw new Error('Bearer sq0at-SECRET Square down')
     }
-    return { counts: [inStock(mauriceIds[3], '2', 'LOC_M')] }
+    return { counts: [inStock(mauriceIds[3], '2', 'LOC_W')] }
   }))
-  const failed = broken.sides.find(side => side.account === 'wholesale')
-  const ok = broken.sides.find(side => side.account === 'maurice')
-  assert(failed.configured === true && failed.error && !failed.error.includes('SECRET'), 'wholesale error is redacted')
-  assert(ok.items.find(item => item.key === 'signature').quantity === '2', 'maurice still returns when wholesale fails')
+  const failed = broken.sides.find(side => side.id === 'wholesale')
+  const ok = broken.sides.find(side => side.id === 'maurice')
+  assert(failed.configured === true && failed.error && !failed.error.includes('SECRET'), 'cafe column error is redacted')
+  assert(ok.items.find(item => item.key === 'signature').quantity === '2', 'inventory column still returns when cafe fetch fails')
 }
 
 function captureRes() {

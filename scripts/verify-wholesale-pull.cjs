@@ -91,9 +91,16 @@ function orderFixture(extra = {}) {
 }
 
 function squareFetchFor(world) {
-  return async ({ method, path: squarePath }) => {
+  return async ({ method, path: squarePath, body }) => {
     world.squareCalls += 1
-    assert(method === 'GET', `square method ${method}`)
+    const verb = method || 'GET'
+    if (verb === 'POST' && squarePath === '/invoices/search') {
+      world.invoiceSearches = world.invoiceSearches || []
+      world.invoiceSearches.push(body)
+      const hits = Array.isArray(world.invoiceHits) ? world.invoiceHits : []
+      return { invoices: hits }
+    }
+    assert(verb === 'GET', `square method ${verb}`)
     assert(!String(squarePath).includes('batch'), squarePath)
     if (squarePath.startsWith('/invoices/')) return { invoice: world.invoice }
     if (squarePath.startsWith('/orders/ORDER_CARD')) return { order: world.cardOrder }
@@ -535,6 +542,153 @@ async function testFailClosedThrows() {
   }, world()), 503)
 }
 
+async function testInvoicePaymentDoesNotPullAndHouseAccountStillDoes() {
+  const when = new Date('2026-09-24T17:00:00.000Z')
+  const checkWorld = world()
+  checkWorld.order = orderFixture({
+    id: 'ORDER_INVOICED',
+    state: 'COMPLETED',
+    created_at: '2026-09-24T15:00:00.000Z'
+  })
+  checkWorld.payment = {
+    id: 'PAY_CHECK',
+    status: 'COMPLETED',
+    location_id: LOCATION,
+    source_type: 'EXTERNAL',
+    order_id: 'ORDER_INVOICED',
+    customer_id: 'CUST_HEBERT',
+    external_details: { type: 'CHECK', source: 'Invoice payment' },
+    created_at: '2026-09-24T16:13:15.000Z'
+  }
+  const checkStore = memoryStore()
+  const checkTodoist = todoistFake()
+  const check = await postEvent(baseEnv(), checkStore, checkTodoist, {
+    type: 'payment.updated',
+    data: { object: { payment: { id: 'PAY_CHECK' } } }
+  }, checkWorld, when)
+  assert(check.json.skipped === 'invoiced_order', JSON.stringify(check.json))
+  assert(checkTodoist.created.length === 0, 'check on an invoice creates no task')
+  assert(checkStore.rows.length === 0, 'check on an invoice stores no pull row')
+
+  const orderWorld = world()
+  orderWorld.order = orderFixture({
+    id: 'ORDER_INVOICED',
+    state: 'COMPLETED',
+    created_at: '2026-09-24T15:00:00.000Z',
+    tenders: [{ type: 'OTHER', note: 'Check' }]
+  })
+  orderWorld.invoiceHits = [{
+    id: 'inv:000225',
+    status: 'PAID',
+    location_id: LOCATION,
+    order_id: 'ORDER_INVOICED',
+    invoice_number: '000225',
+    primary_recipient: { customer_id: 'CUST_HEBERT' }
+  }]
+  const orderStore = memoryStore()
+  const orderTodoist = todoistFake()
+  const orderEvent = await postEvent(baseEnv(), orderStore, orderTodoist, {
+    type: 'order.updated',
+    data: { object: { order: { id: 'ORDER_INVOICED' } } }
+  }, orderWorld, when)
+  assert(orderEvent.json.skipped === 'invoiced_order', JSON.stringify(orderEvent.json))
+  assert(orderTodoist.created.length === 0, 'order update for an invoiced sale creates no task')
+  assert(orderStore.rows.length === 0, 'order update for an invoiced sale stores no pull row')
+  assert(orderWorld.invoiceSearches.length >= 1, 'order path looks up invoices for the order')
+  const search = orderWorld.invoiceSearches[0]
+  assert(search.query.filter.location_ids[0] === LOCATION, 'invoice search stays on the wholesale location')
+  assert(search.query.filter.customer_ids[0] === 'CUST_HEBERT', 'invoice search uses the order customer')
+
+  const cardWorld = world()
+  cardWorld.cardOrder = orderFixture({
+    id: 'ORDER_CARD',
+    state: 'COMPLETED',
+    created_at: '2026-09-24T15:00:00.000Z',
+    tenders: [{ type: 'CARD', payment_id: 'PAY_CARD' }]
+  })
+  cardWorld.cardPayment = {
+    id: 'PAY_CARD',
+    status: 'COMPLETED',
+    source_type: 'CARD',
+    location_id: LOCATION,
+    order_id: 'ORDER_CARD',
+    customer_id: 'CUST_HEBERT',
+    created_at: '2026-09-24T16:13:15.000Z'
+  }
+  cardWorld.invoiceHits = [{
+    id: 'inv:card',
+    status: 'PAID',
+    location_id: LOCATION,
+    order_id: 'ORDER_CARD',
+    primary_recipient: { customer_id: 'CUST_HEBERT' }
+  }]
+  const cardStore = memoryStore()
+  const cardTodoist = todoistFake()
+  const card = await postEvent(baseEnv({ WHOLESALE_PULL_ALL_COMPLETED: '1' }), cardStore, cardTodoist, {
+    type: 'payment.updated',
+    data: { object: { payment: { id: 'PAY_CARD' } } }
+  }, cardWorld, when)
+  assert(card.json.skipped === 'invoiced_order', JSON.stringify(card.json))
+  assert(cardTodoist.created.length === 0, 'card payment on an invoice creates no task')
+  assert(cardStore.rows.length === 0, 'card payment on an invoice stores no pull row')
+
+  const houseWorld = world()
+  houseWorld.order = orderFixture({
+    state: 'COMPLETED',
+    created_at: '2026-09-24T15:00:00.000Z',
+    tenders: [{ type: 'OTHER', note: 'House account' }]
+  })
+  houseWorld.payment = {
+    id: 'PAY_HOUSE',
+    status: 'COMPLETED',
+    location_id: LOCATION,
+    source_type: 'EXTERNAL',
+    order_id: 'ORDER_HEBERT',
+    customer_id: 'CUST_HEBERT',
+    external_details: { type: 'OTHER', source: 'House Account' },
+    created_at: '2026-09-24T16:00:00.000Z'
+  }
+  const houseStore = memoryStore()
+  const houseTodoist = todoistFake()
+  const house = await postEvent(baseEnv(), houseStore, houseTodoist, {
+    type: 'payment.updated',
+    data: { object: { payment: { id: 'PAY_HOUSE' } } }
+  }, houseWorld, when)
+  assert(house.json.created === true, JSON.stringify(house.json))
+  assert(houseTodoist.created.length === 1, 'house-account payment creates one task')
+  assert(houseTodoist.created[0].content === "PULL · Hebert's Maurice · house account", houseTodoist.created[0].content)
+  assert(houseStore.rows.length === 1, 'house-account payment stores one pull row')
+  assert(houseStore.rows[0].idempotency_key === 'order:ORDER_HEBERT', houseStore.rows[0].idempotency_key)
+
+  const again = await postEvent(baseEnv(), houseStore, houseTodoist, {
+    type: 'payment.updated',
+    data: { object: { payment: { id: 'PAY_HOUSE' } } }
+  }, houseWorld, when)
+  assert(again.json.duplicate === true && again.json.created !== true, JSON.stringify(again.json))
+  assert(houseTodoist.created.length === 1, 'duplicate payment webhook does not create a second task')
+  assert(houseStore.rows.length === 1, 'duplicate payment webhook does not insert a second row')
+
+  const staleWorld = world()
+  staleWorld.order = orderFixture({
+    state: 'COMPLETED',
+    created_at: '2026-09-10T17:00:00.000Z',
+    tenders: [{ type: 'OTHER', note: 'House account' }]
+  })
+  staleWorld.payment = {
+    ...staleWorld.payment,
+    created_at: '2026-09-24T16:00:00.000Z'
+  }
+  const staleStore = memoryStore()
+  const staleTodoist = todoistFake()
+  const stale = await postEvent(baseEnv(), staleStore, staleTodoist, {
+    type: 'payment.updated',
+    data: { object: { payment: { id: 'PAY_HEBERT' } } }
+  }, staleWorld, when)
+  assert(stale.json.skipped === 'order_too_old', JSON.stringify(stale.json))
+  assert(staleTodoist.created.length === 0, 'old order creates no task')
+  assert(staleStore.rows.length === 0, 'old order stores no pull row')
+}
+
 async function testHouseAccountOrderAndAllCompleted() {
   const store = memoryStore()
   const todoist = todoistFake()
@@ -609,6 +763,7 @@ async function testReplayAndSheets() {
     body: { orderId: PRACTICE_HEBERTS_MAURICE.orderId, apply: false },
     env: baseEnv(),
     squareFetch: async (args) => {
+      if (args.method === 'POST' && args.path === '/invoices/search') return { invoices: [] }
       squareWorld.order = orderFixture({
         id: PRACTICE_HEBERTS_MAURICE.orderId,
         tenders: [{ type: 'OTHER', note: 'House account' }]
@@ -1631,6 +1786,7 @@ async function main() {
   await testUnpaidInvoiceCreatesTakeoutTask()
   await testSkipsAndFailClosed()
   await testFailClosedThrows()
+  await testInvoicePaymentDoesNotPullAndHouseAccountStillDoes()
   await testHouseAccountOrderAndAllCompleted()
   await testCreatingLockAndMissingName()
   await testReplayAndSheets()

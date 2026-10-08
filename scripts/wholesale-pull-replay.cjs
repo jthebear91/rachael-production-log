@@ -93,14 +93,19 @@ async function localPreview({ orderId, paymentId, invoiceId, invoiceNumber, forc
       process.exit(1)
     }
   }
-  async function squareFetch({ token: squareToken, path, method = 'GET' }) {
+  async function squareFetch({ token: squareToken, path, method = 'GET', body }) {
+    const verb = method || 'GET'
+    if (verb !== 'GET' && !(verb === 'POST' && path === '/invoices/search')) {
+      throw new Error(`Refusing Square ${verb} ${path}`)
+    }
     const res = await fetch(`${SQUARE_BASE}${path}`, {
-      method,
+      method: verb,
       headers: {
         Authorization: `Bearer ${squareToken}`,
         'Square-Version': SQUARE_VERSION,
         'Content-Type': 'application/json'
-      }
+      },
+      body: body === undefined ? undefined : JSON.stringify(body)
     })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {

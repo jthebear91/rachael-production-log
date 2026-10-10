@@ -6,6 +6,11 @@ export default function App() {
   // ── SCREEN ─────────────────────────────────────
   const [screen, setScreen] = useState('log') // 'log' | 'batches'
 
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('screen')
+    if (requested === 'batches' || requested === 'log') setScreen(requested)
+  }, [])
+
   // ── CATALOG ────────────────────────────────────
   const [categories, setCategories] = useState([])
   const [items, setItems] = useState([])
@@ -318,6 +323,14 @@ export default function App() {
     return (sum / packaged.length).toFixed(1)
   }
 
+  function openScreen(next) {
+    setScreen(next)
+    const path = next === 'batches' ? '/?screen=batches' : '/'
+    if (window.location.pathname + window.location.search !== path) {
+      window.history.replaceState(null, '', path)
+    }
+  }
+
   // ══════════════════════════════════════════════
   // RENDER
   // ══════════════════════════════════════════════
@@ -335,12 +348,13 @@ export default function App() {
           <a href="/dashboard" style={{ ...s.tabBtn, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>Sales</a>
           <button
             style={{ ...s.tabBtn, ...(screen === 'log' ? s.tabActive : {}) }}
-            onClick={() => setScreen('log')}
+            onClick={() => openScreen('log')}
           >Daily Log</button>
           <button
             style={{ ...s.tabBtn, ...(screen === 'batches' ? s.tabActive : {}) }}
-            onClick={() => setScreen('batches')}
+            onClick={() => openScreen('batches')}
           >Batch Tracker</button>
+          <a href="/labels" style={{ ...s.tabBtn, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>Day Doc Labels</a>
         </div>
       </header>
 
